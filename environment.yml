@@ -33,6 +33,7 @@ dependencies:
       - einops==0.8.0
       - timm>=1.0.17
       - sentence-transformers>=5.1.0
+      - nystrom-attention
       
       # Visualization and Tracking
       - tensorboard>=2.19.0
