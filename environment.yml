@@ -1,0 +1,51 @@
+name: DepthSense
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  # --- Core dependencies ---
+  - python=3.12.*
+  - numpy>=2.0.0
+  - pandas>=2.2.2
+  - scipy>=1.15.0
+  - scikit-learn>=1.6.0
+  - matplotlib>=3.10.0
+  
+  - ipykernel
+  - notebook
+  - tqdm
+  - pillow>=11.0.0
+  
+  # --- PIP installed dependencies ---
+  - pip
+  - pip:
+      # --- PyTorch ---
+      - torch>=2.6.0
+      - torchvision>=0.22.0
+      - torchaudio>=2.6.0
+      - torchmetrics>=0.11.0
+      - --extra-index-url https://download.pytorch.org/whl/cu126
+
+      # Core NLP and Vision models
+      - transformers>=4.53.2
+      - einops==0.8.0
+      - timm>=1.0.17
+      - sentence-transformers>=5.1.0
+      
+      # Visualization and Tracking
+      - tensorboard>=2.19.0
+      - keybert
+      
+      # Additional  libraries
+      - accelerate>=1.9.0
+      - datasets>=4.0.0
+      - huggingface-hub>=0.33.4
+      - imageio>=2.30.0
+      - pyyaml
+
+# Create
+# conda env create -f environment.yml
+# Remove
+# conda env remove -n <ENV name>
