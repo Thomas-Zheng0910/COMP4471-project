@@ -454,6 +454,14 @@ class UniDepthV1(
 # run with: python -m model.unidepthv1.unidepthv1
 if __name__ == "__main__":
 
+    # torch.hub download location
+    import os
+    os.environ["TORCH_HOME"] = "./cache"
+    # Set hugging face and transformers cache location
+    os.environ['TRANSFORMERS_CACHE'] = './cache'
+    os.environ['HF_HOME'] = './cache'
+    os.environ['HF_HUB_CACHE'] = './cache'
+
     # Create the model config
     config = {
         "model": {

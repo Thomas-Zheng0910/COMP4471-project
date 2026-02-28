@@ -3,11 +3,6 @@ import torch.nn as nn
 
 from model.backbones import ConvNeXt, ConvNeXtV2
 
-# torch.hub download location
-import os
-os.environ["TORCH_HOME"] = "./torch_cache"
-
-
 class ModelWrap(nn.Module):
     def __init__(self, model) -> None:
         super().__init__()

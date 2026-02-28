@@ -1,5 +1,13 @@
 #!/bin/bash
 
+# Cache directory
+# torch.hub download location
+export TORCH_HOME="./cache"
+# Set hugging face and transformers cache location
+export TRANSFORMERS_CACHE="./cache"
+export HF_HOME="./cache"
+export HF_HUB_CACHE="./cache"
+
 # Experiment Configuration
 SEED=42
 CUDA=0

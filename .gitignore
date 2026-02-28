@@ -29,3 +29,7 @@ data/*
 # Misc
 *.log
 .DS_Store
+
+# Ignore cache directories
+cache/
+./cache/
