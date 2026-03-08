@@ -211,15 +211,15 @@ class NYUv2Dataset(Dataset):
         h5 = self._get_h5()
 
         # RGB image
-        # HDF5 layout: (N, 3, W, H) uint8  →  transpose to (H, W, 3)
+        # HDF5 layout: (N, 3, W, H) uint8  ->  transpose to (H, W, 3)
         image_raw = h5["images"][mat_idx]                  # (3, W, H)
-        image_np = np.transpose(image_raw, (2, 1, 0))      # → (H, W, 3)
+        image_np = np.transpose(image_raw, (2, 1, 0))      # (H, W, 3)
         image_pil = Image.fromarray(image_np.astype(np.uint8), mode = "RGB")
 
-        #Depth map
-        # HDF5 layout: (N, W, H) float32, metres  →  transpose to (H, W)
+        # Depth map
+        # HDF5 layout: (N, W, H) float32, metres  ->  transpose to (H, W)
         depth_raw = h5["depths"][mat_idx]                  # (W, H)
-        depth_np = np.transpose(depth_raw, (1, 0))         # → (H, W)
+        depth_np = np.transpose(depth_raw, (1, 0))         # (H, W)
 
         # Transforms
         image_tensor: torch.Tensor = self.image_transform(image_pil)
@@ -301,14 +301,21 @@ if __name__ == "__main__":
     image_tensor, depth_tensor = sample[:2]
     image_np = image_tensor.permute(1, 2, 0).numpy()
     depth_np = depth_tensor.squeeze(0).numpy()
-    plt.figure(figsize = (12, 5))
-    plt.subplot(1, 2, 1)
-    plt.title("RGB Image")
-    plt.imshow(image_np)
-    plt.axis("off")
-    plt.subplot(1, 2, 2)
-    plt.title("Depth Map")
-    plt.imshow(depth_np, cmap = "inferno", vmin = MIN_DEPTH, vmax = MAX_DEPTH)
-    plt.colorbar(label = "Depth (m)")
-    plt.tight_layout()
-    plt.savefig("./datasets/nyuv2_sample.png")
+    # Normalize image for display (undo ImageNet normalization)
+    image_undo_norm = (image_np * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])
+    image_undo_norm = np.clip(image_undo_norm, 0, 1)
+    # Show the RGB image, normed image and depth map side by side
+    fig, axes = plt.subplots(1, 3, figsize = (15, 5))
+    axes[0].imshow(image_undo_norm)
+    axes[0].set_title("RGB Image (undo norm)")
+    axes[0].axis("off")
+    im1 = axes[1].imshow(image_np)
+    axes[1].set_title("RGB Image (normed)")
+    axes[1].axis("off")
+    fig.colorbar(im1, ax = axes[1], fraction = 0.046, pad = 0.04)
+    im2 = axes[2].imshow(depth_np, cmap = "plasma", vmin = MIN_DEPTH, vmax = MAX_DEPTH)
+    axes[2].set_title("Depth Map (metres)")
+    axes[2].axis("off")
+    fig.colorbar(im2, ax = axes[2], fraction = 0.046, pad = 0.04)
+    fig.tight_layout()
+    fig.savefig("./datasets/nyuv2_sample.png")
