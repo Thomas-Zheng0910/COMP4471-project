@@ -39,12 +39,13 @@ dependencies:
       - tensorboard>=2.19.0
       - keybert
       
-      # Additional  libraries
+      # Additional libraries
       - accelerate>=1.9.0
       - datasets>=4.0.0
       - huggingface-hub>=0.33.4
       - imageio>=2.30.0
       - pyyaml
+      - h5py
 
 # Create
 # conda env create -f environment.yml

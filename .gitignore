@@ -1,3 +1,6 @@
+# Ignore datasets
+datasets/
+
 # Python
 __pycache__/
 *.py[cod]
