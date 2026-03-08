@@ -3,6 +3,32 @@ import torch.nn as nn
 
 from model.backbones import ConvNeXt, ConvNeXtV2
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Encoder factory functions
+# ──────────────────────────────────────────────────────────────────────────────
+# Each factory reads ``config.get("output_idx", <default>)`` where <default>
+# is the correct value for that specific backbone architecture.
+#
+# output_idx semantics (ConvNeXt family)
+# ───────────────────────────────────────
+# ConvNeXt / ConvNeXtV2 with depths=[3,3,27,3] has 36 blocks total:
+#   stage 0: blocks  1– 3 (dim=192,  stride 4)
+#   stage 1: blocks  4– 6 (dim=384,  stride 8)
+#   stage 2: blocks  7–33 (dim=768,  stride 16)
+#   stage 3: blocks 34–36 (dim=1536, stride 32)
+# output_idx=[3, 6, 33, 36] → cumulative endpoint of each stage.
+# The decoder groups encoder outputs by these boundaries and max-pools
+# within each group via max_stack().
+#
+# output_idx semantics (DINOv2 ViT family)
+# ─────────────────────────────────────────
+# DINOv2 ViT-L/14  (depth=24):  output_idx=[5, 12, 18, 24]
+# DINOv2 ViT-B/14  (depth=12):  output_idx=[3,  6,  9, 12]
+# DINOv2 ViT-S/14  (depth=12):  output_idx=[3,  6,  9, 12]
+# All ViT blocks share the same spatial resolution (H/14 × W/14).
+# The decoder handles this via the ``if len(level_shapes) == 1`` branch.
+# ──────────────────────────────────────────────────────────────────────────────
+
 class ModelWrap(nn.Module):
     def __init__(self, model) -> None:
         super().__init__()

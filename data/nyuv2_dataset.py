@@ -134,6 +134,11 @@ class NYUv2Dataset(Dataset):
             depth in metres (float32).
         split (str): One of ``"train"``, ``"test"``, or ``"all"``.
             Uses the standard 654-image Eigen test split.
+        flip_aug (bool): If ``True``, ``__getitem__`` returns a
+            ``(original, flipped)`` tuple so the DataLoader / collate_fn
+            can build interleaved batches required by the SelfDistill
+            invariance loss.  Should be ``True`` for training only.
+            Defaults to ``False``.
         image_transform (callable, optional): Transform applied to the
             RGB image (PIL Image → tensor).  Defaults to
             ``_default_image_transform()``.
@@ -149,6 +154,11 @@ class NYUv2Dataset(Dataset):
                                clipped to [MIN_DEPTH, MAX_DEPTH].
         depth_mask (torch.Tensor): ``(1, H, W)`` bool, valid depth pixels.
         K      (torch.Tensor, optional): ``(3, 3)`` float32 intrinsics.
+
+    When ``flip_aug=True`` the return is a 2-tuple
+    ``(original_dict, flipped_dict)`` where the flipped dict has the image,
+    depth and mask horizontally mirrored and the principal-point cx updated
+    to ``W - cx`` in K.
     """
 
     # Eigen et al. 654 test indices (1-based -> converted to 0-based)
@@ -160,6 +170,7 @@ class NYUv2Dataset(Dataset):
         image_shape: Tuple[int, int] = (480, 640),
         depth_scale: float = DEPTH_SCALE,
         split: str = "train",
+        flip_aug: bool = False,
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
         return_intrinsics: bool = True,
@@ -172,6 +183,7 @@ class NYUv2Dataset(Dataset):
 
         self.mat_path = root
         self.split = split
+        self.flip_aug = flip_aug
         self.return_intrinsics = return_intrinsics
         self.image_shape = tuple(image_shape)
         self.depth_scale = depth_scale
@@ -227,6 +239,44 @@ class NYUv2Dataset(Dataset):
         mask[..., 45:-9, 41:-39] = True
         return depth * mask.float()
 
+    def _make_sample(
+        self,
+        image_tensor: torch.Tensor,
+        depth_tensor: torch.Tensor,
+        depth_mask: torch.Tensor,
+        flip: bool,
+    ) -> Dict:
+        
+        """
+        Build a single sample dict, optionally horizontal-flipped.
+        """
+
+        if flip:
+            image_tensor = torch.flip(image_tensor, dims = [-1])
+            depth_tensor = torch.flip(depth_tensor, dims = [-1])
+            depth_mask   = torch.flip(depth_mask,   dims = [-1])
+
+        sample: Dict = {
+            "image":      image_tensor,  # [3, H, W] float32
+            "depth":      depth_tensor,  # [1, H, W] float32
+            "depth_mask": depth_mask,    # [1, H, W] bool
+            "flip":       flip,          # bool – consumed by collate_fn → img_metas
+            "si":         False,         # scale-invariant flag (always False for NYUv2)
+        }
+
+        if self.return_intrinsics:
+            K = NYUV2_INTRINSICS.clone()  # [3, 3] float32
+            if flip:
+                # Horizontal flip maps pixel x -> W - x, so cx -> W - cx.
+                # W is the image width AFTER transforms (may differ from 640
+                # if image_shape was set to a non-default value).
+                W_img = image_tensor.shape[-1]
+                K = K.clone()
+                K[0, 2] = W_img - K[0, 2]
+            sample["K"] = K
+
+        return sample
+
     # ------------------------------------------------------------------
     # Dataset interface
     # ------------------------------------------------------------------
@@ -234,7 +284,7 @@ class NYUv2Dataset(Dataset):
     def __len__(self) -> int:
         return len(self.indices)
 
-    def __getitem__(self, idx: int) -> Tuple:
+    def __getitem__(self, idx: int):
         mat_idx = self.indices[idx]
         h5 = self._get_h5()
 
@@ -260,53 +310,71 @@ class NYUv2Dataset(Dataset):
         if self.split == "test":
             depth_tensor = self._apply_eval_mask(depth_tensor)
 
-        # Depth mask (all pixels for now)
+        # Depth mask (all pixels are valid for NYUv2 dense GT)
         depth_mask = torch.ones_like(depth_tensor, dtype = torch.bool)
 
-        # Use dict to return
-        to_return = {
-            "image": image_tensor,     # [3, H, W] float32, ImageNet-normalized
-            "depth": depth_tensor,     # [1, H, W] float32, meters
-            "depth_mask": depth_mask,  # [1, H, W] bool
-        }
-
-        if self.return_intrinsics:
-            to_return["K"] = NYUV2_INTRINSICS.clone()  # [3, 3] float32
-
-        # return as dict
-        return to_return
+        if self.flip_aug:
+            # Return (original, horizontally-flipped) pair so the collate_fn
+            # can interleave them into [orig0, flip0, orig1, flip1, ...] batches
+            # required by the SelfDistill invariance loss.
+            original = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
+            flipped  = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = True)
+            return original, flipped
+        else:
+            return self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
 
     def __repr__(self) -> str:
         return (
             f"NYUv2Dataset(split='{self.split}', "
+            f"flip_aug={self.flip_aug}, "
             f"n_samples={len(self)}, "
             f"mat_path='{self.mat_path}')"
         )
     
     @classmethod
-    def collate_fn(cls, batch: List[Dict]) -> Dict:
-
+    def collate_fn(cls, batch: List) -> Dict:
         """
-        Default collate function — stacks tensors.
-        """
+        Collate function that handles both:
 
-        keys = batch[0].keys()
-        # Get image data
-        collated = {}
-        for key in keys:
+        * **Regular samples** - ``batch`` is a list of dicts (``flip_aug=False``).
+        * **Paired samples** - ``batch`` is a list of ``(original_dict, flipped_dict)``
+          tuples (``flip_aug=True``).  The originals and their flips are interleaved
+          so that consecutive batch positions are always ``(orig_i, flip_i)`` from
+          the same scene - the layout expected by the SelfDistill invariance loss.
+
+        ``flip`` and ``si`` fields are extracted from each sample and returned
+        in ``img_metas`` as a list of per-sample dicts; they are NOT included in
+        the ``data`` tensor dict.
+        """
+        # unpack paired samples
+        if batch and isinstance(batch[0], (list, tuple)) and len(batch[0]) == 2:
+            flat: List[Dict] = []
+            for orig, flipped in batch:
+                flat.append(orig)
+                flat.append(flipped)
+            batch = flat
+
+        # separate metadata fields from tensor fields
+        META_KEYS = {"flip", "si"}
+        img_metas: List[Dict] = [
+            {k: item[k] for k in META_KEYS if k in item}
+            for item in batch
+        ]
+
+        # stack tensor fields
+        data_keys = [k for k in batch[0].keys() if k not in META_KEYS]
+        collated: Dict = {}
+        for key in data_keys:
             vals = [item[key] for item in batch]
             if isinstance(vals[0], torch.Tensor):
                 collated[key] = torch.stack(vals, dim = 0)
             else:
-                collated[key] = vals  # e.g., list of filenames
-        # Get metadata
-        meta = None
-        # Output dict
-        output_dict = {
-            'data': collated,
-            'img_metas': meta,
+                collated[key] = vals
+
+        return {
+            "data":      collated,
+            "img_metas": img_metas,
         }
-        return output_dict
 
 
 # Test code

@@ -463,11 +463,15 @@ if __name__ == "__main__":
     os.environ['HF_HUB_CACHE'] = './cache'
 
     # Create the model config
+    # NOTE: output_idx is intentionally omitted here so the encoder factory
+    # (convnext_large_pt) uses its own correct default of [3, 6, 33, 36].
+    # When switching to a ViT encoder (e.g. "dinov2_vitl14") simply change
+    # the name; the encoder factory will automatically use [5, 12, 18, 24].
     config = {
         "model": {
             "pixel_encoder": {
                 "name": "convnext_large_pt",
-                "output_idx": [3, 6, 33, 36],
+                # output_idx NOT set -> encoder default [3, 6, 33, 36] is used
                 "use_checkpoint": False,
             },
             "pixel_decoder": {

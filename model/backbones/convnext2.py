@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from timm.layers import DropPath, trunc_normal_
+from torch.utils.checkpoint import checkpoint as grad_checkpoint
 
 
 def get_num_layer_for_convnext(var_name):
@@ -126,7 +127,7 @@ class Block(nn.Module):
         self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
         self.use_checkpoint = use_checkpoint
 
-    def forward(self, x):
+    def _inner_forward(self, x):
         input = x
         x = self.dwconv(x)
         x = x.permute(0, 2, 3, 1)
@@ -138,6 +139,11 @@ class Block(nn.Module):
         x = x.permute(0, 3, 1, 2)
         x = input + self.drop_path(x)
         return x
+
+    def forward(self, x):
+        if self.use_checkpoint and self.training:
+            return grad_checkpoint(self._inner_forward, x, use_reentrant=False)
+        return self._inner_forward(x)
 
 
 class ConvNeXtV2(nn.Module):

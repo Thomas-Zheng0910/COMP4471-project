@@ -1,3 +1,5 @@
+# NOTE: please downgrade setuptools to 81.0.0 to launch tensorboard
+#       pip install setuptools==81.0.0
 name: DepthSense
 channels:
   - pytorch

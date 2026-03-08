@@ -12,7 +12,7 @@ export HF_HUB_CACHE="./cache"
 SEED=648
 CUDA=0
 EPOCHS=50
-BATCH_SIZE=64
+BATCH_SIZE=2
 LR=1e-4
 LR_MIN=1e-6
 WEIGHT_DECAY=0.01
@@ -22,13 +22,13 @@ SAVE_EVERY=1
 
 # Model Architecture — Pixel Encoder
 ENCODER_NAME="convnext_large_pt"
-OUTPUT_IDX="3 6 33 36"
+OUTPUT_IDX="" # Set to empty string to use encoder default output indices
 USE_CHECKPOINT="false"
 
 # Model Architecture — Pixel Decoder
 HIDDEN_DIM=512
 DROPOUT=0.0
-DEPTHS="1 2 3"
+DEPTHS="3 2 1"
 NUM_HEADS=8
 EXPANSION=4
 
@@ -63,7 +63,6 @@ CMD="python -m train.train_depth \
     --log_every $LOG_EVERY \
     --save_every $SAVE_EVERY \
     --encoder_name $ENCODER_NAME \
-    --output_idx $OUTPUT_IDX \
     --use_checkpoint $USE_CHECKPOINT \
     --hidden_dim $HIDDEN_DIM \
     --dropout $DROPOUT \
@@ -89,6 +88,10 @@ fi
 
 if [ -n "$RESUME" ]; then
     CMD="$CMD --resume $RESUME"
+fi
+
+if [ -n "$OUTPUT_IDX" ]; then
+    CMD="$CMD --output_idx $OUTPUT_IDX"
 fi
 
 # Execute Command

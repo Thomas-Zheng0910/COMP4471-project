@@ -50,7 +50,7 @@ def get_args() -> argparse.Namespace:
 
     # Model architecture
     parser.add_argument('--encoder_name', type=str, default='convnextv2_large')
-    parser.add_argument('--output_idx', type=int, nargs='+', default=[3, 6, 33, 36])
+    parser.add_argument('--output_idx', type=int, nargs='+', default=None)
     parser.add_argument('--use_checkpoint', type=lambda x: x.lower() == 'true', default=False)
     parser.add_argument('--hidden_dim', type=int, default=512)
     parser.add_argument('--dropout', type=float, default=0.0)
@@ -94,7 +94,8 @@ def build_config(args: argparse.Namespace) -> dict:
             "name": "UniDepthV1",
             "pixel_encoder": {
                 "name": args.encoder_name,
-                "output_idx": args.output_idx,
+                # If output_idx is None, don't set this key
+                **({"output_idx": args.output_idx} if args.output_idx is not None else {}),
                 "use_checkpoint": args.use_checkpoint,
             },
             "pixel_decoder": {
@@ -235,6 +236,7 @@ def main():
         split = "train",
         image_shape = data_cfg["image_shape"],
         depth_scale = data_cfg.get("depth_scale", 0.001),
+        flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
     )
     train_loader = DataLoader(
         train_dataset,
@@ -328,13 +330,18 @@ def main():
                                      desc = f"Epoch {epoch + 1}/{num_epochs}",
                                      unit = "batch"):
             
-            # Move tensors to device
-            image = batch['data']["image"].to(device)            # [B, 3, H, W]
-            depth = batch['data']["depth"].to(device)            # [B, 1, H, W]
-            depth_mask = batch['data']["depth_mask"].to(device)  # [B, 1, H, W]
-            K = batch['data']["K"].to(device)                    # [B, 3, 3]
+            # Move tensors to device.
+            # With flip_aug=True the collate_fn has already interleaved
+            # (original, flipped) pairs: [orig0, flip0, orig1, flip1, ...].
+            # Each consecutive pair is the same scene under different flips,
+            # which is what SelfDistill expects.
+            image = batch['data']["image"].to(device)            # [2B, 3, H, W]
+            depth = batch['data']["depth"].to(device)            # [2B, 1, H, W]
+            depth_mask = batch['data']["depth_mask"].to(device)  # [2B, 1, H, W]
+            K = batch['data']["K"].to(device)                    # [2B, 3, 3]
 
-            # Build camera object for this batch
+            # Build Pinhole camera with per-sample intrinsics (cx already updated
+            # for flipped samples by the dataset's _make_sample method).
             camera = build_camera_from_batch(K)
 
             # Prepare inputs dict as expected by UniDepthV1
@@ -344,10 +351,9 @@ def main():
                 "depth_mask": depth_mask,
                 "camera": camera,
             }
-            img_metas = batch['img_metas']
 
-            # image_metas: per-sample metadata (empty dicts for simplicity)
-            image_metas = [{} for _ in range(image.shape[0])]
+            # image_metas carry the flip / si flags set per-sample by the dataset
+            image_metas = batch['img_metas']
 
             # Forward pass
             optimizer.zero_grad()
@@ -383,17 +389,10 @@ def main():
                     log_depth_images(writer, "train/pred_depth", outputs["depth"], global_step)
                 log_depth_images(writer, "train/gt_depth", depth, global_step)
 
-                print(
-                    f"Epoch [{epoch+1}/{num_epochs}] "
-                    f"Step {global_step} "
-                    f"Loss: {total_loss.item():.4f} "
-                    f"LR: {current_lr:.2e}"
-                )
-
         # ── End-of-epoch ─────────────────────────────────────────────────
         avg_loss = epoch_loss / max(num_batches, 1)
         writer.add_scalar("epoch/train_loss", avg_loss, epoch + 1)
-        print(f"Epoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f}")
+        print(f"Epoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f} - LR: {current_lr:.6f}")
 
         # Step the LR scheduler
         scheduler.step()
@@ -405,10 +404,10 @@ def main():
             val_batches = 0
             with torch.no_grad():
                 for batch in val_loader:
-                    image = batch["image"].to(device)
-                    depth = batch["depth"].to(device)
-                    depth_mask = batch["depth_mask"].to(device)
-                    K = batch["K"].to(device)
+                    image = batch["data"]["image"].to(device)
+                    depth = batch["data"]["depth"].to(device)
+                    depth_mask = batch["data"]["depth_mask"].to(device)
+                    K = batch["data"]["K"].to(device)
                     camera = build_camera_from_batch(K)
                     inputs = {
                         "image": image,

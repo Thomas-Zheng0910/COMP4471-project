@@ -156,6 +156,16 @@ class Pinhole(Camera):
             )
         super().__init__(params=params, K=K)
 
+    def get_rays(self, shapes, noisy=False):
+        """
+        Override base class to correctly handle a batched Pinhole camera (K=[B,3,3]).
+        The base Camera.get_rays uses coords_grid(1,...) which is designed for the
+        BatchCamera.unproject iteration pattern. For a single Pinhole with K=[B,3,3]
+        we must use get_pinhole_rays which generates per-sample coordinate grids.
+        """
+        
+        return self.get_pinhole_rays(shapes, noisy=noisy)
+
     @torch.autocast(device_type="cuda", enabled=False, dtype=torch.float32)
     def project(self, pcd):
         b, _, h, w = pcd.shape
