@@ -9,10 +9,10 @@ export HF_HOME="./cache"
 export HF_HUB_CACHE="./cache"
 
 # Experiment Configuration
-SEED=42
+SEED=648
 CUDA=0
 EPOCHS=50
-BATCH_SIZE=4
+BATCH_SIZE=64
 LR=1e-4
 LR_MIN=1e-6
 WEIGHT_DECAY=0.01
@@ -21,7 +21,7 @@ LOG_EVERY=50
 SAVE_EVERY=1
 
 # Model Architecture — Pixel Encoder
-ENCODER_NAME="convnextv2_large"
+ENCODER_NAME="convnext_large_pt"
 OUTPUT_IDX="3 6 33 36"
 USE_CHECKPOINT="false"
 
@@ -41,10 +41,10 @@ INVARIANCE_LOSS_NAME="SelfDistill"
 INVARIANCE_LOSS_WEIGHT=0.1
 
 # Data Configuration
-TRAIN_ROOT="data/demo"
-VAL_ROOT=""
-IMAGE_SHAPE="384 384"
-DEPTH_SCALE=0.001
+TRAIN_ROOT="datasets/nyu_depth_v2_labeled.mat"
+VAL_ROOT="datasets/nyu_depth_v2_labeled.mat"
+IMAGE_SHAPE="480 640"
+DEPTH_SCALE=1.0
 NUM_WORKERS=4
 
 # Checkpoint Resume (leave empty for fresh start)

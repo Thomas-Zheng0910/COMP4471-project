@@ -194,7 +194,7 @@ class UniDepthV1(
         inputs["cls_tokens"] = cls_tokens
 
         # Decode
-        pred_intrinsics, predictions, depth_features = self.pixel_decoder(inputs, {})
+        pred_intrinsics, predictions, depth_features = self.pixel_decoder.forward(inputs, {})
         predictions = sum(
             [
                 F.interpolate(

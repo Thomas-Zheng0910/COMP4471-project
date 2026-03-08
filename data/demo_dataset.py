@@ -40,6 +40,7 @@ class DemoImageDataset(Dataset):
     def __init__(
         self,
         root: str,
+        split: str = "train",
         image_shape: Tuple[int, int] = (384, 384),
         depth_scale: float = 0.001,
     ):

@@ -23,8 +23,8 @@ import torch
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
-from data.dummy_dataset import DummyDataset as ImageDataset
-from model.unidepthv1 import UniDepthV1
+from data.nyuv2_dataset import NYUv2Dataset as ImageDataset
+from model.unidepthv1.unidepthv1 import UniDepthV1
 from utils.camera import Pinhole
 from utils.visualization import colorize
 
@@ -67,7 +67,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--invariance_loss_weight', type=float, default=0.1)
 
     # Data configuration
-    parser.add_argument('--train_root', type=str, default='data/demo')
+    parser.add_argument('--train_root', type=str, default=None)
     parser.add_argument('--val_root', type=str, default=None)
     parser.add_argument('--image_shape', type=int, nargs=2, default=[384, 384])
     parser.add_argument('--depth_scale', type=float, default=0.001)
@@ -232,6 +232,7 @@ def main():
 
     train_dataset = ImageDataset(
         root = data_cfg["train_root"],
+        split = "train",
         image_shape = data_cfg["image_shape"],
         depth_scale = data_cfg.get("depth_scale", 0.001),
     )
@@ -252,6 +253,7 @@ def main():
     if data_cfg.get("val_root") is not None:
         val_dataset = ImageDataset(
             root = data_cfg["val_root"],
+            split = "test",
             image_shape = data_cfg["image_shape"],
             depth_scale = data_cfg.get("depth_scale", 0.001),
         )

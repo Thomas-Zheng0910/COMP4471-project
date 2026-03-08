@@ -1,5 +1,5 @@
 # NYU Depth V2 Dataset
-# Adapted from: http://horatio.cs.nyu.edu/mit/silberman/nyu_depth_v2/nyu_depth_v2_labeled.mat
+# Adapted from: https://github.com/lpiccinelli-eth/UniDepth/blob/main/unidepth/datasets/nyuv2.py
 
 
 # --------------- Start of configuration --------------- #
@@ -11,7 +11,7 @@ NYUV2_MAT_PATH = "datasets/nyu_depth_v2_labeled.mat"
 
 # import necessary libraries
 import os
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, List, Dict
 
 import h5py
 import numpy as np
@@ -38,10 +38,6 @@ MAX_DEPTH: float = 10.0
 # Raw depth values in the .mat file are in metres (float32 already scaled)
 DEPTH_SCALE: float = 1.0
 
-# Eigen split – 654 test images (standard benchmark, 0-based indices)
-EIGEN_TEST_INDICES_PATH: Optional[str] = None  # set to a .txt of indices if available
-
-
 # ---------------------------------------------------------------------------
 # Helper: load the HDF5-backed .mat file (v7.3 format)
 # ---------------------------------------------------------------------------
@@ -66,28 +62,49 @@ def _load_mat(mat_path: str) -> h5py.File:
 # Default image transforms
 # ---------------------------------------------------------------------------
 
-def _default_image_transform() -> Callable:
+def _default_image_transform(resample_shape: Tuple[int, int] = None) -> Callable:
 
     """
     Standard ImageNet-normalised transform used by depth models.
     """
 
-    return transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize(
-            mean = [0.485, 0.456, 0.406],
-            std = [0.229, 0.224, 0.225],
-        ),
-    ])
+    if resample_shape is not None:
+        image_transforms = [
+            transforms.Resize(resample_shape),
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        ]
+    else:
+        image_transforms = [
+            transforms.ToTensor(),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225],
+            )
+        ]
+
+    return transforms.Compose(image_transforms)
 
 
-def _default_depth_transform(depth_np: np.ndarray) -> torch.Tensor:
+def _default_depth_transform(resample_shape: Tuple[int, int] = None) -> Callable:
 
     """
     Convert a raw HxW float32 numpy depth array to a (1, H, W) float32 tensor.
     """
 
-    return torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)
+    def transform(depth_np: np.ndarray) -> torch.Tensor:
+        if resample_shape is not None:
+            # Resample depth map using PIL (nearest neighbour to preserve values)
+            depth_pil = Image.fromarray(depth_np.astype(np.float32), mode = "F")
+            depth_pil_resampled = depth_pil.resize(resample_shape, resample = Image.NEAREST)
+            depth_np_resampled = np.array(depth_pil_resampled, dtype = np.float32)
+            return torch.from_numpy(depth_np_resampled).unsqueeze(0)
+        return torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)
+
+    return transform
 
 
 # ---------------------------------------------------------------------------
@@ -106,9 +123,15 @@ class NYUv2Dataset(Dataset):
     654 test images; the remaining 795 are used for training.
 
     Args:
-        mat_path (str): Path to ``nyu_depth_v2_labeled.mat``.
+        root (str): Path to ``nyu_depth_v2_labeled.mat``.
             Defaults to the ``NYUV2_MAT_PATH`` macro defined at the top
             of this file.
+        image_shape (Tuple[int, int]): Target resolution (H, W) for
+            images and depth maps.  Defaults to (480, 640) (the original
+            resolution).
+        depth_scale (float): Scale factor to convert raw depth values to
+            metres.  Defaults to 1.0 since the .mat file already contains
+            depth in metres (float32).
         split (str): One of ``"train"``, ``"test"``, or ``"all"``.
             Uses the standard 654-image Eigen test split.
         image_transform (callable, optional): Transform applied to the
@@ -124,6 +147,7 @@ class NYUv2Dataset(Dataset):
         image  (torch.Tensor): ``(3, H, W)`` float32, normalised.
         depth  (torch.Tensor): ``(1, H, W)`` float32, depth in **metres**,
                                clipped to [MIN_DEPTH, MAX_DEPTH].
+        depth_mask (torch.Tensor): ``(1, H, W)`` bool, valid depth pixels.
         K      (torch.Tensor, optional): ``(3, 3)`` float32 intrinsics.
     """
 
@@ -132,11 +156,13 @@ class NYUv2Dataset(Dataset):
 
     def __init__(
         self,
-        mat_path: str = NYUV2_MAT_PATH,
+        root: str = NYUV2_MAT_PATH,
+        image_shape: Tuple[int, int] = (480, 640),
+        depth_scale: float = DEPTH_SCALE,
         split: str = "train",
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
-        return_intrinsics: bool = False,
+        return_intrinsics: bool = True,
     ) -> None:
         super().__init__()
 
@@ -144,15 +170,17 @@ class NYUv2Dataset(Dataset):
             f"split must be one of 'train', 'test', 'all', got '{split}'."
         )
 
-        self.mat_path = mat_path
+        self.mat_path = root
         self.split = split
         self.return_intrinsics = return_intrinsics
+        self.image_shape = tuple(image_shape)
+        self.depth_scale = depth_scale
 
         self.image_transform = (
-            image_transform if image_transform is not None else _default_image_transform()
+            image_transform if image_transform is not None else _default_image_transform(self.image_shape if self.image_shape != (480, 640) else None)
         )
         self.depth_transform = (
-            depth_transform if depth_transform is not None else _default_depth_transform
+            depth_transform if depth_transform is not None else _default_depth_transform(self.image_shape if self.image_shape != (480, 640) else None)
         )
 
         # Read total count once, then close (fork-safety for DataLoader)
@@ -220,6 +248,8 @@ class NYUv2Dataset(Dataset):
         # HDF5 layout: (N, W, H) float32, metres  ->  transpose to (H, W)
         depth_raw = h5["depths"][mat_idx]                  # (W, H)
         depth_np = np.transpose(depth_raw, (1, 0))         # (H, W)
+        # Scaling
+        depth_np = depth_np * self.depth_scale if self.depth_scale != 1.0 else depth_np
 
         # Transforms
         image_tensor: torch.Tensor = self.image_transform(image_pil)
@@ -230,9 +260,21 @@ class NYUv2Dataset(Dataset):
         if self.split == "test":
             depth_tensor = self._apply_eval_mask(depth_tensor)
 
+        # Depth mask (all pixels for now)
+        depth_mask = torch.ones_like(depth_tensor, dtype = torch.bool)
+
+        # Use dict to return
+        to_return = {
+            "image": image_tensor,     # [3, H, W] float32, ImageNet-normalized
+            "depth": depth_tensor,     # [1, H, W] float32, meters
+            "depth_mask": depth_mask,  # [1, H, W] bool
+        }
+
         if self.return_intrinsics:
-            return image_tensor, depth_tensor, NYUV2_INTRINSICS.clone()
-        return image_tensor, depth_tensor
+            to_return["K"] = NYUV2_INTRINSICS.clone()  # [3, 3] float32
+
+        # return as dict
+        return to_return
 
     def __repr__(self) -> str:
         return (
@@ -240,70 +282,58 @@ class NYUv2Dataset(Dataset):
             f"n_samples={len(self)}, "
             f"mat_path='{self.mat_path}')"
         )
-
-
-# ---------------------------------------------------------------------------
-# Convenience factory functions
-# ---------------------------------------------------------------------------
-
-def get_nyuv2_train(
-    mat_path: str = NYUV2_MAT_PATH,
-    image_transform: Optional[Callable] = None,
-    depth_transform: Optional[Callable] = None,
-    return_intrinsics: bool = False,
-) -> NYUv2Dataset:
     
-    """
-    Return the NYU Depth V2 training split (Eigen split, ~795 images).
-    """
+    @classmethod
+    def collate_fn(cls, batch: List[Dict]) -> Dict:
 
-    return NYUv2Dataset(
-        mat_path = mat_path,
-        split = "train",
-        image_transform = image_transform,
-        depth_transform = depth_transform,
-        return_intrinsics = return_intrinsics,
-    )
+        """
+        Default collate function — stacks tensors.
+        """
 
+        keys = batch[0].keys()
+        # Get image data
+        collated = {}
+        for key in keys:
+            vals = [item[key] for item in batch]
+            if isinstance(vals[0], torch.Tensor):
+                collated[key] = torch.stack(vals, dim = 0)
+            else:
+                collated[key] = vals  # e.g., list of filenames
+        # Get metadata
+        meta = None
+        # Output dict
+        output_dict = {
+            'data': collated,
+            'img_metas': meta,
+        }
+        return output_dict
 
-def get_nyuv2_test(
-    mat_path: str = NYUV2_MAT_PATH,
-    image_transform: Optional[Callable] = None,
-    depth_transform: Optional[Callable] = None,
-    return_intrinsics: bool = False,
-) -> NYUv2Dataset:
-    
-    """
-    Return the NYU Depth V2 test split (Eigen split, 654 images).
-    """
-
-    return NYUv2Dataset(
-        mat_path = mat_path,
-        split = "test",
-        image_transform = image_transform,
-        depth_transform = depth_transform,
-        return_intrinsics = return_intrinsics,
-    )
 
 # Test code
 if __name__ == "__main__":
 
     # Quick test: load the first sample from the training split
-    dataset = get_nyuv2_train()
-    print(dataset)
-    sample = dataset[0]
-    print("Sample keys:", sample.keys() if isinstance(sample, dict) else "N/A")
-    print("Image shape:", sample[0].shape)
-    print("Depth shape:", sample[1].shape)
+    dataset = NYUv2Dataset(split = "train", return_intrinsics = True)
+    # Create dataloader
+    from torch.utils.data import DataLoader
+    dataloader = DataLoader(dataset, batch_size = 1, shuffle = True, 
+                            collate_fn = NYUv2Dataset.collate_fn)
+    sample = next(iter(dataloader))["data"]
+    print("Sample keys:", sample.keys())
+    print("Image shape:", sample["image"].shape)
+    print("Depth shape:", sample["depth"].shape)
+    print("Depth mask shape:", sample["depth_mask"].shape)
+    print("K shape:", sample["K"].shape)
 
-    # Plot the first sample
+    # Plot a sample
     from matplotlib import pyplot as plt
-    image_tensor, depth_tensor = sample[:2]
+    image_tensor, depth_tensor = sample["image"][0], sample["depth"][0]  # (3, H, W), (1, H, W)
     image_np = image_tensor.permute(1, 2, 0).numpy()
     depth_np = depth_tensor.squeeze(0).numpy()
     # Normalize image for display (undo ImageNet normalization)
     image_undo_norm = (image_np * np.array([0.229, 0.224, 0.225])) + np.array([0.485, 0.456, 0.406])
     image_undo_norm = np.clip(image_undo_norm, 0, 1)
+    print(f"[DEBUG] un-normed image shape: {image_undo_norm.shape}, dtype: {image_undo_norm.dtype}")
     # Show the RGB image, normed image and depth map side by side
     fig, axes = plt.subplots(1, 3, figsize = (15, 5))
     axes[0].imshow(image_undo_norm)

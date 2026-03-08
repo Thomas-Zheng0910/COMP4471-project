@@ -34,6 +34,7 @@ class DummyDataset(Dataset):
     def __init__(
         self,
         root: str = "DummyDataset",
+        split: str = "train",
         image_shape: Tuple[int, int] = (384, 384),
         depth_scale: float = 0.001,
     ):
