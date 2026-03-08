@@ -28,6 +28,8 @@ runs/
 data/*
 !data/*.py
 !data/__init__.py
+# Keep get_datasets directory
+!data/get_datasets/
 
 # Misc
 *.log
