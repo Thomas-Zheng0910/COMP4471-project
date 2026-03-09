@@ -416,11 +416,9 @@ def main():
                         "camera": camera,
                     }
                     image_metas = [{} for _ in range(image.shape[0])]
-                    # Run in train mode temporarily to get losses
-                    model.train()
-                    with torch.no_grad():
-                        _, losses_val = model(inputs, image_metas)
-                    model.eval()
+                    # NOTE: forward_train computes losses,
+                    #       consider fixing this function call
+                    _ , losses_val = model.forward_train(inputs, image_metas)
                     val_loss += sum(losses_val["opt"].values()).item()
                     val_batches += 1
 
