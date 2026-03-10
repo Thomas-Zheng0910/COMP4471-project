@@ -1,5 +1,5 @@
 # COMP4471 UniDepthV1 - Repository Structure Guide
-Last Updated: 2026-03-02
+Last Updated: 2026-03-10
 
 ## Project Overview
 
@@ -21,11 +21,13 @@ Last Updated: 2026-03-02
 COMP4471-project/
 ├── README.md                           # Project overview and documentation
 ├── environment.yml                     # Conda environment dependencies
+├── libc++FIX.sh                        # Fix libc++ / pandas import issues on Linux
 │
 ├── data/                               # Data loading modules
 │   ├── __init__.py
-│   ├── dummy_dataset.py               # Generates random RGB/depth pairs on-the-fly
-│   └── demo_dataset.py                # Loads RGB images + depths from disk
+│   ├── nyuv2_dataset.py               # NYU Depth V2 dataset loader (from .mat file)
+│   └── get_datasets/
+│       └── get_nyu_v2.sh              # Script to download nyu_depth_v2_labeled.mat
 │
 ├── model/                              # Model architecture components
 │   ├── __init__.py
@@ -90,7 +92,7 @@ COMP4471-project/
 │   └── visualization.py               # Depth colorization and visualization
 │
 └── run_script/                         # Bash scripts for training and inference
-    ├── run_train_demo.sh              # Training script with configurable parameters
+    ├── run_train.sh                   # Training script with configurable parameters (NYUv2)
     └── run_infer_demo.sh              # Inference script with configurable parameters
 ```
 
@@ -215,23 +217,19 @@ COMP4471-project/
 
 ### Data Loading
 
-#### **data/dummy_dataset.py** - Synthetic Data
-- `DummyDataset`: Generates random RGB images and depth on-the-fly
-- No disk I/O required
-- Useful for testing and debugging
-- Generates 1000 synthetic samples
-- ImageNet normalization included
+#### **data/nyuv2_dataset.py** - NYU Depth V2 Dataset
+- `NYUv2Dataset`: Loads the official NYU Depth V2 labeled split from `nyu_depth_v2_labeled.mat` (MATLAB v7.3 / HDF5 format)
+- 1449 densely labelled indoor RGBD pairs; uses the standard **Eigen et al. 654-image test split**
+- Args: `root`, `image_shape`, `depth_scale`, `split` (`"train"` / `"test"` / `"all"`), `flip_aug`, `return_intrinsics`
+- Built-in `flip_aug`: returns `(original, flipped)` tuples for **SelfDistill** invariance loss
+- Provides `NYUv2Dataset.collate_fn` that interleaves flipped pairs and separates tensor data from `img_metas`
+- Hard-coded `NYUV2_INTRINSICS` (fx, fy, cx, cy from the NYUv2 toolbox), depth range 0.005 – 10.0 m
+- Applies Eigen border-crop eval mask when `split="test"`
+- Lazy per-worker HDF5 file handle for DataLoader fork-safety
 
-#### **data/demo_dataset.py** - Real Data
-- `DemoImageDataset`: Loads real images + depths from disk
-- Expected structure:
-  ```
-  root/
-    images/          # RGB images (PNG)
-    depths/          # Depth maps (16-bit, mm units)
-    intrinsics.json  # Camera parameters (optional)
-  ```
-- Supports optional ground-truth evaluation
+#### **data/get_datasets/get_nyu_v2.sh** - Dataset Download Script
+- Downloads `nyu_depth_v2_labeled.mat` (~2.8 GB) from the MIT Silberman host
+- Saves to `./datasets/nyu_depth_v2_labeled.mat`
 
 ### Training Pipeline
 
@@ -429,16 +427,16 @@ infer_depth.py
 
 ## Configuration via Shell Scripts
 
-### **run_script/run_train_demo.sh**
+### **run_script/run_train.sh**
 Configures:
-- Checkpoint path
-- Data root (demo data location)
-- Output directory
-- GPU/device selection
-- Model architecture (encoder, depths, heads, etc.)
-- Training hyperparameters (batch size, LR, epochs)
-- Data preprocessing (image shape, depth scale)
-- Loss function composition
+- Data root pointing to `datasets/nyu_depth_v2_labeled.mat`
+- GPU/device selection and random seed
+- Model architecture (encoder name, depths, heads, hidden dim, etc.)
+- Training hyperparameters (batch size, LR, lr_min, weight decay, grad clip, epochs)
+- Loss composition (depth loss, camera loss, invariance/SelfDistill loss + weights)
+- Data preprocessing (image shape 480×640, depth scale)
+- Optional checkpoint resume path
+- Optional `output_idx` for selecting encoder feature levels
 
 ### **run_script/run_infer_demo.sh**
 Configures:
@@ -477,13 +475,14 @@ Configures:
 ## Usage Example
 
 ```bash
-# Training (from run_script/run_train_demo.sh)
+# Training (from run_script/run_train.sh)
 python -m train.train_depth \
-  --encoder_name convnextv2_large \
-  --batch_size 4 \
+  --encoder_name convnext_large_pt \
+  --batch_size 2 \
   --epochs 50 \
   --lr 1e-4 \
-  --output_idx 3 6 33 36
+  --train_root datasets/nyu_depth_v2_labeled.mat \
+  --val_root datasets/nyu_depth_v2_labeled.mat
 
 # Inference (from run_script/run_infer_demo.sh)
 python -m infer.infer_depth \
@@ -503,4 +502,17 @@ The **COMP4471 UniDepthV1** project is a well-structured monocular depth estimat
 - **Comprehensive utilities**: camera geometry, visualization, evaluation
 - **Production-ready**: TensorBoard logging, checkpointing, evaluation metrics
 - **Single-GPU focused**: Simplified training without distributed complexities
+- **Real dataset integration**: NYU Depth V2 via HDF5 with Eigen split, flip augmentation, and custom collate_fn
+
+---
+
+## Changelog
+
+### 2026-03-10
+- **Added** `data/nyuv2_dataset.py`: Full `NYUv2Dataset` replacing `dummy_dataset.py` and `demo_dataset.py`. Loads directly from the official `.mat` file, supports train/test/all splits, flip augmentation for SelfDistill, and a custom `collate_fn`.
+- **Added** `data/get_datasets/get_nyu_v2.sh`: Download script for `nyu_depth_v2_labeled.mat`.
+- **Renamed** `run_script/run_train_demo.sh` → `run_script/run_train.sh`: Updated to target the NYUv2 `.mat` dataset path and revised default hyperparameters.
+- **Added** `libc++FIX.sh`: Shell script to patch `LD_LIBRARY_PATH` inside the `DepthSense` conda environment when pandas/h5py fail to import due to `libc++` conflicts.
+- **Removed** `data/dummy_dataset.py` (synthetic random data, no longer needed).
+- **Removed** `data/demo_dataset.py` (disk-based demo loader, superseded by `nyuv2_dataset.py`).
 
