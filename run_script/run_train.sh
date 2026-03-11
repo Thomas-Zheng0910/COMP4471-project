@@ -10,7 +10,7 @@ export HF_HUB_CACHE="./cache"
 
 # Experiment Configuration
 SEED=648
-CUDA=0
+CUDA=1
 EPOCHS=50
 BATCH_SIZE=2
 LR=1e-4
@@ -21,7 +21,7 @@ LOG_EVERY=50
 SAVE_EVERY=1
 
 # Model Architecture — Pixel Encoder
-ENCODER_NAME="convnext_large_pt"
+ENCODER_NAME="dinov3_vits14"
 OUTPUT_IDX="" # Set to empty string to use encoder default output indices
 USE_CHECKPOINT="false"
 
