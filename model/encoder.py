@@ -161,9 +161,9 @@ def convnext_large(config, **kwargs):
     return model
 
 
-def dinov2_vits14(config, pretrained: bool = True, **kwargs):
-    from model.backbones.dinov2 import _make_dinov2_model
-    return _make_dinov2_model(
+def dinov3_vits16(config, **kwargs):
+    from model.backbones.dinov3 import _make_dinov3_model
+    return _make_dinov3_model(
         arch_name="vit_small",
         pretrained=config["pretrained"],
         output_idx=config.get("output_idx", [3, 6, 9, 12]),
@@ -173,9 +173,9 @@ def dinov2_vits14(config, pretrained: bool = True, **kwargs):
     )
 
 
-def dinov2_vitb14(config, pretrained: bool = True, **kwargs):
-    from model.backbones.dinov2 import _make_dinov2_model
-    return _make_dinov2_model(
+def dinov3_vitb16(config, **kwargs):
+    from model.backbones.dinov3 import _make_dinov3_model
+    return _make_dinov3_model(
         arch_name="vit_base",
         pretrained=config["pretrained"],
         output_idx=config.get("output_idx", [3, 6, 9, 12]),
@@ -185,9 +185,9 @@ def dinov2_vitb14(config, pretrained: bool = True, **kwargs):
     )
 
 
-def dinov2_vitl14(config, pretrained: str = "", **kwargs):
-    from model.backbones.dinov2 import _make_dinov2_model
-    return _make_dinov2_model(
+def dinov3_vitl16(config, **kwargs):
+    from model.backbones.dinov3 import _make_dinov3_model
+    return _make_dinov3_model(
         arch_name="vit_large",
         pretrained=config["pretrained"],
         output_idx=config.get("output_idx", [5, 12, 18, 24]),

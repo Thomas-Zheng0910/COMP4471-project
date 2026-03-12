@@ -50,6 +50,7 @@ def get_args() -> argparse.Namespace:
 
     # Model architecture
     parser.add_argument('--encoder_name', type=str, default='convnextv2_large')
+    parser.add_argument('--pretrained', type=str, default="")
     parser.add_argument('--output_idx', type=int, nargs='+', default=None)
     parser.add_argument('--use_checkpoint', type=lambda x: x.lower() == 'true', default=False)
     parser.add_argument('--hidden_dim', type=int, default=512)
@@ -94,6 +95,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "name": "UniDepthV1",
             "pixel_encoder": {
                 "name": args.encoder_name,
+                "pretrained": args.pretrained if hasattr(args, "pretrained") and args.pretrained else "",
                 # If output_idx is None, don't set this key
                 **({"output_idx": args.output_idx} if args.output_idx is not None else {}),
                 "use_checkpoint": args.use_checkpoint,
@@ -419,7 +421,7 @@ def main():
                     # NOTE: forward_train computes losses,
                     #       consider fixing this function call
                     _ , losses_val = model.forward_train(inputs, image_metas)
-                    val_loss += sum(losses_val["opt"].values()).item()
+                    val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
 
             avg_val_loss = val_loss / max(val_batches, 1)

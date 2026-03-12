@@ -425,9 +425,7 @@ class UniDepthV1(
         }
         pixel_encoder = pixel_encoder_factory(pixel_encoder_config)
 
-        config["model"]["pixel_encoder"]["patch_size"] = (
-            14 if "dino" in config["model"]["pixel_encoder"]["name"] else 16
-        )
+        config["model"]["pixel_encoder"]["patch_size"] = 16
         pixel_encoder_embed_dims = (
             pixel_encoder.embed_dims
             if hasattr(pixel_encoder, "embed_dims")
