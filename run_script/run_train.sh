@@ -10,7 +10,7 @@ export HF_HUB_CACHE="./cache"
 
 # Experiment Configuration
 SEED=648
-CUDA=0
+CUDA=2
 EPOCHS=50
 BATCH_SIZE=2
 LR=1e-4

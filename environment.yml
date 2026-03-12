@@ -53,3 +53,6 @@ dependencies:
 # conda env create -f environment.yml
 # Remove
 # conda env remove -n <ENV name>
+
+
+# tensorboard --logdir 
