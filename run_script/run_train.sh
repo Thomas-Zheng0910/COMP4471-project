@@ -21,7 +21,7 @@ LOG_EVERY=50
 SAVE_EVERY=1
 
 # Model Architecture — Pixel Encoder
-ENCODER_NAME="dinov3_vits14"
+ENCODER_NAME="dinov3_vits16"
 OUTPUT_IDX="" # Set to empty string to use encoder default output indices
 USE_CHECKPOINT="false"
 

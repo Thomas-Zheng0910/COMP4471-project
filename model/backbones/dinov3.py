@@ -442,7 +442,7 @@ def _make_dinov3_model(
     )
     vit_kwargs.update(**kwargs)
     model = eval(arch_name)(**vit_kwargs)
-    if pretrained == "":
+    if pretrained == "" and _DINOV3_BASE_URL is not None:
         url = _DINOV3_BASE_URL + f"/{model_name}/{model_name}"
         if num_register_tokens > 0:
             url += "_reg4"
@@ -452,7 +452,7 @@ def _make_dinov3_model(
         )
         info = model.load_state_dict(state_dict, strict=False)
         print(info)
-    elif pretrained is not None:
+    elif pretrained is not None and pretrained != "":
         state_dict = torch.load(pretrained, map_location="cpu")
         info = model.load_state_dict(state_dict, strict=False)
         print(f"loading from {pretrained} with:", info)

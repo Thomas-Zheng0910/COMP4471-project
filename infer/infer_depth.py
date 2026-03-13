@@ -22,8 +22,10 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
+from torch.utils.data import DataLoader
 
-from model.unidepthv1 import UniDepthV1
+from data.nyuv2_dataset import NYUv2Dataset
+from model.unidepthv1.unidepthv1 import UniDepthV1
 from utils.evaluation_depth import eval_depth
 from utils.visualization import colorize, image_grid
 
@@ -80,6 +82,21 @@ def get_args() -> argparse.Namespace:
     parser.add_argument(
         "--max_depth", type=float, default=None,
         help="Optional cap on GT depth used during metric evaluation.",
+    )
+
+    # --- NYUv2 test-set evaluation (alternative to folder mode) ---
+    parser.add_argument(
+        "--nyu_mat", type=str, default=None,
+        help="Path to nyu_depth_v2_labeled.mat.  When provided, runs the full "
+             "Eigen 654-image test split instead of the --data_root folder.",
+    )
+    parser.add_argument(
+        "--nyu_batch_size", type=int, default=4,
+        help="Batch size used when evaluating on the NYUv2 test set.",
+    )
+    parser.add_argument(
+        "--nyu_num_workers", type=int, default=4,
+        help="DataLoader workers for NYUv2 test-set evaluation.",
     )
 
     return parser.parse_args()
@@ -173,6 +190,75 @@ def main():
     model.to(device).eval()
     print("Model loaded and set to eval mode.")
 
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Branch: NYUv2 test-set evaluation via DataLoader ─────────────────────
+    if args.nyu_mat is not None:
+        print(f"\nNYUv2 test-set evaluation on {args.nyu_mat}")
+        nyu_test = NYUv2Dataset(
+            root=args.nyu_mat,
+            split="test",
+            image_shape=args.image_shape,
+            depth_scale=1.0,  # .mat depths already in metres
+            flip_aug=False,
+            return_intrinsics=True,
+        )
+        nyu_loader = DataLoader(
+            nyu_test,
+            batch_size=args.nyu_batch_size,
+            shuffle=False,
+            num_workers=args.nyu_num_workers,
+            pin_memory=device.type == "cuda",
+            collate_fn=NYUv2Dataset.collate_fn,
+        )
+        print(f"Test samples: {len(nyu_test)}")
+
+        nyu_agg: dict = defaultdict(list)
+        imagenet_mean = torch.tensor([0.485, 0.456, 0.406], device=device).view(3, 1, 1)
+        imagenet_std  = torch.tensor([0.229, 0.224, 0.225], device=device).view(3, 1, 1)
+        with torch.no_grad():
+            for batch_idx, batch in enumerate(nyu_loader):
+                images = batch["data"]["image"]   # [B, 3, H, W] ImageNet-normed
+                gts    = batch["data"]["depth"].to(device)  # [B, 1, H, W]
+                Ks     = batch["data"].get("K")             # [B, 3, 3] or None
+                B = images.shape[0]
+                for i in range(B):
+                    # Undo ImageNet normalisation → [0,255] uint8 for model.infer()
+                    rgb_i = (images[i].to(device) * imagenet_std + imagenet_mean)
+                    rgb_uint8 = (rgb_i * 255).clamp(0, 255).to(torch.uint8)
+                    K_i = Ks[i].to(device) if Ks is not None else None
+                    pred_i = model.infer(rgb_uint8, intrinsics=K_i)["depth"]
+                    if pred_i.ndim == 4:
+                        pred_i = pred_i.squeeze(0)  # (1, H, W)
+                    gt_i   = gts[i]           # (1, H, W)
+                    mask_i = (gt_i > 0)       # (1, H, W)
+                    if args.max_depth is not None:
+                        mask_i = mask_i & (gt_i <= args.max_depth)
+                    sample_m = eval_depth(
+                        gts=gt_i.unsqueeze(0),
+                        preds=pred_i.unsqueeze(0),
+                        masks=mask_i.unsqueeze(0),
+                        max_depth=args.max_depth,
+                    )
+                    for name, vals in sample_m.items():
+                        nyu_agg[name].append(vals.mean().item())
+                if (batch_idx + 1) % 10 == 0:
+                    print(f"  {(batch_idx + 1) * B}/{len(nyu_test)} samples processed …")
+
+        print("\n── NYUv2 Test-Set Metrics ──")
+        nyu_results = {name: float(np.mean(v)) for name, v in nyu_agg.items()}
+        acc_keys = sorted(k for k in nyu_results if k.startswith("d"))
+        err_keys = sorted(k for k in nyu_results if k not in acc_keys)
+        for key in acc_keys + err_keys:
+            print(f"  {key:20s}: {nyu_results[key]:.4f}")
+        m_path = out_dir / "metrics_nyu_test.json"
+        with open(m_path, "w") as f:
+            json.dump(nyu_results, f, indent=2)
+        print(f"\nMetrics saved to {m_path}")
+        print("Done.")
+        return  # skip folder-mode below
+
     # ── Discover images ──────────────────────────────────────────────────────
     data_root = Path(args.data_root)
     images_dir = data_root / "images"
@@ -180,9 +266,13 @@ def main():
     if not images_dir.exists():
         raise FileNotFoundError(f"Images directory not found: {images_dir}")
 
-    image_paths = sorted(images_dir.glob("*.png"))
+    # Support PNG and JPEG
+    image_paths = sorted(
+        p for ext in ("*.png", "*.jpg", "*.jpeg", "*.PNG", "*.JPG", "*.JPEG")
+        for p in images_dir.glob(ext)
+    )
     if not image_paths:
-        raise RuntimeError(f"No *.png images found in {images_dir}")
+        raise RuntimeError(f"No images (.png/.jpg/.jpeg) found in {images_dir}")
 
     has_gt = depths_dir.exists()
     intrinsics_map = load_intrinsics(str(data_root / "intrinsics.json"))
@@ -192,7 +282,6 @@ def main():
         print(f"Ground-truth depth available in {depths_dir}")
 
     # ── Output dirs ──────────────────────────────────────────────────────────
-    out_dir = Path(args.output_dir)
     pred_dir = out_dir / "pred_depth"
     vis_dir = out_dir / "visualisations"
     pred_dir.mkdir(parents=True, exist_ok=True)
@@ -212,11 +301,12 @@ def main():
         rgb_torch = torch.from_numpy(rgb_np).permute(2, 0, 1)  # C, H, W
         orig_h, orig_w = rgb_np.shape[:2]
 
-        # Optional intrinsics
-        intrinsics = None
+        # Optional intrinsics: JSON map → fallback to default pinhole
         if intrinsics_map is not None and stem in intrinsics_map:
             fx, fy, cx, cy = intrinsics_map[stem]
             intrinsics = build_K(fx, fy, cx, cy)
+        else:
+            intrinsics = default_intrinsics(orig_h, orig_w)
 
         # Run inference
         with torch.no_grad():

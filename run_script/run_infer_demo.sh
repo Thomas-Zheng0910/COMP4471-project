@@ -14,7 +14,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 
 # ── Paths ─────────────────────────────────────────────────────────────────────
-CHECKPOINT="runs/train_depth_*/checkpoints/epoch_50.pth"   # adjust to your checkpoint
+CHECKPOINT=$(ls runs/train_depth_*/checkpoints/epoch_*.pth 2>/dev/null | sort -t_ -k5 -n | tail -1)  # auto-select latest checkpoint
 DATA_ROOT="data/demo"
 OUTPUT_DIR="runs/infer"
 

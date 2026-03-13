@@ -165,7 +165,7 @@ def dinov3_vits16(config, **kwargs):
     from model.backbones.dinov3 import _make_dinov3_model
     return _make_dinov3_model(
         arch_name="vit_small",
-        pretrained=config["pretrained"],
+        pretrained=config.get("pretrained", None),
         output_idx=config.get("output_idx", [3, 6, 9, 12]),
         checkpoint=config.get("use_checkpoint", False),
         drop_path_rate=config.get("drop_path", 0.0),
@@ -177,7 +177,7 @@ def dinov3_vitb16(config, **kwargs):
     from model.backbones.dinov3 import _make_dinov3_model
     return _make_dinov3_model(
         arch_name="vit_base",
-        pretrained=config["pretrained"],
+        pretrained=config.get("pretrained", None),
         output_idx=config.get("output_idx", [3, 6, 9, 12]),
         checkpoint=config.get("use_checkpoint", False),
         drop_path_rate=config.get("drop_path", 0.0),
@@ -189,7 +189,7 @@ def dinov3_vitl16(config, **kwargs):
     from model.backbones.dinov3 import _make_dinov3_model
     return _make_dinov3_model(
         arch_name="vit_large",
-        pretrained=config["pretrained"],
+        pretrained=config.get("pretrained", None),
         output_idx=config.get("output_idx", [5, 12, 18, 24]),
         checkpoint=config.get("use_checkpoint", False),
         drop_path_rate=config.get("drop_path", 0.0),

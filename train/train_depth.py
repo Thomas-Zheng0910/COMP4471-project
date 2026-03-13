@@ -95,7 +95,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "name": "UniDepthV1",
             "pixel_encoder": {
                 "name": args.encoder_name,
-                "pretrained": args.pretrained if hasattr(args, "pretrained") and args.pretrained else "",
+                "pretrained": args.pretrained if hasattr(args, "pretrained") and args.pretrained else None,
                 # If output_idx is None, don't set this key
                 **({"output_idx": args.output_idx} if args.output_idx is not None else {}),
                 "use_checkpoint": args.use_checkpoint,
@@ -417,9 +417,10 @@ def main():
                         "depth_mask": depth_mask,
                         "camera": camera,
                     }
-                    image_metas = [{} for _ in range(image.shape[0])]
-                    # NOTE: forward_train computes losses,
-                    #       consider fixing this function call
+                    image_metas = batch["img_metas"]
+                    # model is in eval() mode: forward() dispatches to forward_test
+                    # which does NOT compute losses. We use forward_train explicitly
+                    # so we can still get loss values for monitoring.
                     _ , losses_val = model.forward_train(inputs, image_metas)
                     val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
