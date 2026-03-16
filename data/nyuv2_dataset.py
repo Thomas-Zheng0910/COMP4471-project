@@ -38,6 +38,11 @@ MAX_DEPTH: float = 10.0
 # Raw depth values in the .mat file are in metres (float32 already scaled)
 DEPTH_SCALE: float = 1.0
 
+# Image net normalisation stats (from torchvision.transforms)
+# NOTE: These are used in inferencing (revert normalised images)
+IMAGENET_MEAN = [0.485, 0.456, 0.406]
+IMAGENET_STD = [0.229, 0.224, 0.225]
+
 # ---------------------------------------------------------------------------
 # Helper: load the HDF5-backed .mat file (v7.3 format)
 # ---------------------------------------------------------------------------
