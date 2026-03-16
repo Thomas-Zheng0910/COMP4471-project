@@ -1,0 +1,3 @@
+The download link is not available in China. Must use a local ver. 
+To safe the space, only vits16 is uploaded for testing. 
+If you need to use model of other size, please upload the corresponding model to this folder. I have also downloaded other sizes.

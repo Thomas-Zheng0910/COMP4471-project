@@ -1,3 +1,6 @@
+# Ignore datasets
+datasets/
+
 # Python
 __pycache__/
 *.py[cod]
@@ -25,7 +28,13 @@ runs/
 data/*
 !data/*.py
 !data/__init__.py
+# Keep get_datasets directory
+!data/get_datasets/
 
 # Misc
 *.log
 .DS_Store
+
+# Ignore cache directories
+cache/
+./cache/
