@@ -198,7 +198,7 @@ def main():
 
     print("Arguments:")
     for arg in vars(args):
-        print(f"  {arg}: {getattr(args, arg)}")
+        print(f"  \033[1m{arg}:\033[0m {getattr(args, arg)}")
 
     torch.manual_seed(args.seed)
     if torch.cuda.is_available():
@@ -211,7 +211,7 @@ def main():
     # Experiment output directory under ./runs/
     log_dir = f"runs/train_depth_{int(time())}"
     os.makedirs(log_dir, exist_ok = True)
-    print(f"Logging to {log_dir}")
+    print(f"\n\033[1mLogging to {log_dir}\033[0m")
     tensorboard_dir = f"{log_dir}/tensorboard"
     ckpt_dir = f"{log_dir}/checkpoints"
     os.makedirs(tensorboard_dir, exist_ok = True)
@@ -220,15 +220,14 @@ def main():
     # Copy run script for reproducibility
     if args.script_path and os.path.isfile(args.script_path):
         shutil.copy(args.script_path, f"{log_dir}/run_script.sh")
-        print(f"Saved launch script to {log_dir}/run_script.sh")
+        print(f"\033[1mSaved launch script to {log_dir}/run_script.sh\033[0m")
 
     # Set up model
-    print("Building UniDepthV1 ...")
     model = UniDepthV1(config)
     model.to(device)
 
     # Set up Datasets & DataLoaders
-    print("Setting up datasets and dataloaders ...")
+    print("\n>>> Setting up datasets and dataloaders >>>")
 
     train_cfg = config["training"]
     data_cfg = config["data"]
@@ -271,9 +270,9 @@ def main():
         )
 
     # verbose
-    print(f"Train samples: {len(train_dataset)}")
+    print(f"\033[1mTrain samples:\033[0m {len(train_dataset)}")
     if val_loader:
-        print(f"Val samples:   {len(val_dataset)}")
+        print(f"\033[1mVal samples:\033[0m   {len(val_dataset)}")
 
     # Set up Optimizer
     # Use model.get_params() for layer-wise LR decay (encoder vs decoder)
@@ -301,18 +300,18 @@ def main():
     start_epoch = 0
     global_step = 0
     if args.resume is not None:
-        print(f"Resuming from checkpoint: {args.resume}")
+        print(f"\n>>> Resuming from checkpoint: {args.resume} >>>")
         ckpt = torch.load(args.resume, map_location = device)
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt.get("epoch", 0) + 1
         global_step = ckpt.get("global_step", 0)
-        print(f"  Resumed at epoch {start_epoch}, step {global_step}")
+        print(f"\033[92mResumed at epoch {start_epoch}, step {global_step}\033[0m")
 
     # Set up TensorBoard writer
     writer = SummaryWriter(log_dir = tensorboard_dir)
-    print(f"TensorBoard logs -> {tensorboard_dir}")
+    print(f"\n\033[1mTensorBoard logs -> {tensorboard_dir}\033[0m")
 
     # Config logging and checkpointing intervals
     log_every = train_cfg.get("log_every", 50)
@@ -394,7 +393,7 @@ def main():
         # ── End-of-epoch ─────────────────────────────────────────────────
         avg_loss = epoch_loss / max(num_batches, 1)
         writer.add_scalar("epoch/train_loss", avg_loss, epoch + 1)
-        print(f"Epoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f} - LR: {current_lr:.6f}")
+        print(f"\033[1mEpoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f} - LR: {current_lr:.6f}\033[0m")
 
         # Step the LR scheduler
         scheduler.step()
@@ -427,7 +426,7 @@ def main():
 
             avg_val_loss = val_loss / max(val_batches, 1)
             writer.add_scalar("epoch/val_loss", avg_val_loss, epoch + 1)
-            print(f"  Val loss: {avg_val_loss:.4f}")
+            print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 
         # ── Save checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % save_every == 0:
@@ -445,7 +444,7 @@ def main():
             )
 
     writer.close()
-    print(f"Training complete. Tensorboard logs saved to: {tensorboard_dir}")
+    print(f"\n\033[1;32mTraining complete. Tensorboard logs saved to: {tensorboard_dir}\033[0m")
 
 
 if __name__ == "__main__":
