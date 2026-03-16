@@ -115,9 +115,9 @@ class UniDepthV1(
         self.eps = eps
 
     @profile_method(verbose=VERBOSE)
-    def forward_train(self, inputs, image_metas):
+    def forward_train(self, inputs, image_metas, force_compute_losses = False):
         inputs, outputs = self.encode_decode(inputs, image_metas)
-        losses = self.compute_losses(outputs, inputs, image_metas)
+        losses = self.compute_losses(outputs, inputs, image_metas, force_compute = force_compute_losses)
         return outputs, losses
 
     @profile_method(verbose=VERBOSE)
@@ -234,11 +234,11 @@ class UniDepthV1(
             inputs["rays"] = rearrange(inputs["rays"], "b (h w) c -> b c h w", h=H, w=W)
         return inputs, outputs
 
-    def compute_losses(self, outputs, inputs, image_metas):
+    def compute_losses(self, outputs, inputs, image_metas, force_compute = False):
         B, _, H, W = inputs["image"].shape
         losses = {"opt": {}, "stat": {}}
         if (
-            not self.training
+            not self.training and not force_compute
         ):  # only compute losses during training, avoid issues for mismatch size of pred and GT
             return losses
         losses_to_be_computed = list(self.losses.keys())

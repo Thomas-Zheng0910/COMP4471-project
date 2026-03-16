@@ -421,7 +421,7 @@ def main():
                     # model is in eval() mode: forward() dispatches to forward_test
                     # which does NOT compute losses. We use forward_train explicitly
                     # so we can still get loss values for monitoring.
-                    _ , losses_val = model.forward_train(inputs, image_metas)
+                    _ , losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
                     val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
 
