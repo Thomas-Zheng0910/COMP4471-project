@@ -59,8 +59,14 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--num_heads', type=int, default=8)
     parser.add_argument('--expansion', type=int, default=4)
     parser.add_argument('--use_lidar_fusion', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--lidar_fusion_type', type=str, default='late', choices=['late', 'token'], help='Fusion type: late (1/16 scale) or token (multi-scale)')
     parser.add_argument('--lidar_dropout_prob', type=float, default=0.0)
     parser.add_argument('--phase4_eval_fallback', type=lambda x: x.lower() == 'true', default=True)
+    
+    # Phase 5 ablation configuration
+    parser.add_argument('--phase5_ablation', type=str, default=None, 
+                        choices=['rgb_only', 'supervision_only', 'late_fusion', 'token_fusion'],
+                        help='Phase 5 ablation: train specific variant')
 
     # Loss configuration
     parser.add_argument('--depth_loss_name', type=str, default='SILog')
@@ -115,6 +121,7 @@ def build_config(args: argparse.Namespace) -> dict:
                 "dropout": args.dropout,
                 "depths": args.depths,
                 "use_lidar_fusion": args.use_lidar_fusion,
+                "lidar_fusion_type": args.lidar_fusion_type,
             },
             "num_heads": args.num_heads,
             "expansion": args.expansion,
@@ -269,6 +276,25 @@ def compute_depth_rmse(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask
 def main():
     args = get_args()
     config = build_config(args)
+    
+    # Apply Phase 5 ablation configurations
+    if args.phase5_ablation:
+        print(f"\n🔄 Applying Phase 5 ablation: {args.phase5_ablation}")
+        if args.phase5_ablation == 'rgb_only':
+            # RGB only: no LiDAR
+            config["data"]["use_lidar"] = False
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = False
+        elif args.phase5_ablation == 'supervision_only':
+            # RGB + LiDAR supervision (no fusion)
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = False
+        elif args.phase5_ablation == 'late_fusion':
+            # RGB + LiDAR with late fusion
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
+            config["model"]["pixel_decoder"]["lidar_fusion_type"] = "late"
+        elif args.phase5_ablation == 'token_fusion':
+            # RGB + LiDAR with token fusion
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
+            config["model"]["pixel_decoder"]["lidar_fusion_type"] = "token"
 
     print("Arguments:")
     for arg in vars(args):
