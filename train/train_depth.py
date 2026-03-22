@@ -72,6 +72,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--val_root', type=str, default=None)
     parser.add_argument('--image_shape', type=int, nargs=2, default=[384, 384])
     parser.add_argument('--depth_scale', type=float, default=0.001)
+    parser.add_argument('--use_lidar', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--lidar_root', type=str, default=None)
+    parser.add_argument('--lidar_depth_scale', type=float, default=1.0)
+    parser.add_argument('--lidar_h5_key', type=str, default=None)
+    parser.add_argument('--lidar_confidence_h5_key', type=str, default=None)
     parser.add_argument('--num_workers', type=int, default=4)
 
     # Checkpoint resume
@@ -148,6 +153,11 @@ def build_config(args: argparse.Namespace) -> dict:
             "val_root": args.val_root,
             "image_shape": args.image_shape,
             "depth_scale": args.depth_scale,
+            "use_lidar": args.use_lidar,
+            "lidar_root": args.lidar_root,
+            "lidar_depth_scale": args.lidar_depth_scale,
+            "lidar_h5_key": args.lidar_h5_key,
+            "lidar_confidence_h5_key": args.lidar_confidence_h5_key,
             "num_workers": args.num_workers,
         },
     }
@@ -237,6 +247,11 @@ def main():
         split = "train",
         image_shape = data_cfg["image_shape"],
         depth_scale = data_cfg.get("depth_scale", 0.001),
+        use_lidar = data_cfg.get("use_lidar", False),
+        lidar_root = data_cfg.get("lidar_root", None),
+        lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+        lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+        lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
     )
     train_loader = DataLoader(
@@ -259,6 +274,11 @@ def main():
             split = "test",
             image_shape = data_cfg["image_shape"],
             depth_scale = data_cfg.get("depth_scale", 0.001),
+            use_lidar = data_cfg.get("use_lidar", False),
+            lidar_root = data_cfg.get("lidar_root", None),
+            lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+            lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+            lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         )
         val_loader = DataLoader(
             val_dataset,
@@ -271,6 +291,7 @@ def main():
 
     # verbose
     print(f"\033[1mTrain samples:\033[0m {len(train_dataset)}")
+    print(f"\033[1mLiDAR enabled:\033[0m {data_cfg.get('use_lidar', False)}")
     if val_loader:
         print(f"\033[1mVal samples:\033[0m   {len(val_dataset)}")
 
