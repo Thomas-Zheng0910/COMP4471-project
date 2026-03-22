@@ -5,9 +5,11 @@
 # repo_id: fabiotosi92/Diffusion4RobustDepth
 # The dataset would be downloaded under ./datasets/Diffusion4RobustDepth/
 
-# Set Hugging face cache directory to ./datasets/hf_cache
-export HF_HOME="./datasets/hf_cache"
-export HF_HUB_CACHE="./datasets/hf_cache"
+# Set Hugging face cache directory
+export TORCH_HOME="./cache"
+export TRANSFORMERS_CACHE="./cache"
+export HF_HOME="./cache"
+export HF_HUB_CACHE="./cache"
 export HF_HUB_ENABLE_HF_TRANSFER="0"  # Disable hf_transfer to avoid potential issues with large files
 export HF_HUB_DOWNLOAD_TIMEOUT="60"  # Increased timeout for large files
 
