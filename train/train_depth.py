@@ -66,6 +66,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--camera_loss_weight', type=float, default=0.5)
     parser.add_argument('--invariance_loss_name', type=str, default='SelfDistill')
     parser.add_argument('--invariance_loss_weight', type=float, default=0.1)
+    parser.add_argument('--lidar_loss_weight', type=float, default=0.5)
 
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
@@ -146,6 +147,11 @@ def build_config(args: argparse.Namespace) -> dict:
                     "weight": args.invariance_loss_weight,
                     "output_fn": "sqrt",
                 },
+                "lidar": {
+                    "name": "LiDARSparse",
+                    "weight": args.lidar_loss_weight,
+                    "fn": "log_l1",
+                },
             },
         },
         "data": {
@@ -196,6 +202,50 @@ def save_checkpoint(state: dict, path: str):
     os.makedirs(os.path.dirname(path), exist_ok = True)
     torch.save(state, path)
     print(f"  Checkpoint saved -> {path}")
+
+
+def compute_lidar_sparse_loss(
+    pred_depth: torch.Tensor,
+    lidar_depth: torch.Tensor,
+    lidar_mask: torch.Tensor,
+    lidar_confidence: torch.Tensor = None,
+    eps: float = 1e-6,
+):
+
+    """
+    Phase 2 sparse LiDAR supervision:
+        weighted mean(|log(pred) - log(lidar)|) on valid sparse pixels.
+    """
+
+    valid = lidar_mask.bool()
+    if not torch.any(valid):
+        return None, {
+            "valid_ratio": 0.0,
+            "valid_pixels": 0,
+        }
+
+    if lidar_confidence is not None:
+        weights = torch.clamp(lidar_confidence, min = 0.0) * valid.float()
+    else:
+        weights = valid.float()
+
+    weight_sum = weights.sum()
+    if weight_sum <= 0:
+        return None, {
+            "valid_ratio": float(valid.float().mean().item()),
+            "valid_pixels": int(valid.sum().item()),
+        }
+
+    pred_log = torch.log(torch.clamp(pred_depth, min = eps))
+    lidar_log = torch.log(torch.clamp(lidar_depth, min = eps))
+    abs_log_diff = torch.abs(pred_log - lidar_log)
+
+    sparse_loss = (abs_log_diff * weights).sum() / weight_sum
+    stats = {
+        "valid_ratio": float(valid.float().mean().item()),
+        "valid_pixels": int(valid.sum().item()),
+    }
+    return sparse_loss, stats
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -346,6 +396,9 @@ def main():
         model.train()
         epoch_loss = 0.0
         num_batches = 0
+        lidar_epoch_valid_ratio_sum = 0.0
+        lidar_epoch_steps = 0
+        current_lr = optimizer.param_groups[0]["lr"]
 
         for batch_idx, batch in tqdm(enumerate(train_loader), 
                                      total = len(train_loader),
@@ -361,6 +414,16 @@ def main():
             depth = batch['data']["depth"].to(device)            # [2B, 1, H, W]
             depth_mask = batch['data']["depth_mask"].to(device)  # [2B, 1, H, W]
             K = batch['data']["K"].to(device)                    # [2B, 3, 3]
+
+            lidar_depth = batch['data'].get("lidar_depth", None)
+            lidar_mask = batch['data'].get("lidar_mask", None)
+            lidar_confidence = batch['data'].get("lidar_confidence", None)
+            if lidar_depth is not None:
+                lidar_depth = lidar_depth.to(device)
+            if lidar_mask is not None:
+                lidar_mask = lidar_mask.to(device)
+            if lidar_confidence is not None:
+                lidar_confidence = lidar_confidence.to(device)
 
             # Build Pinhole camera with per-sample intrinsics (cx already updated
             # for flipped samples by the dataset's _make_sample method).
@@ -382,6 +445,19 @@ def main():
             outputs, losses = model.forward(inputs, image_metas)
 
             # Compute total loss
+            lidar_raw_loss = None
+            lidar_stats = None
+            lidar_weight = train_cfg["losses"].get("lidar", {}).get("weight", 0.0)
+            if lidar_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs:
+                lidar_raw_loss, lidar_stats = compute_lidar_sparse_loss(
+                    pred_depth = outputs["depth"],
+                    lidar_depth = lidar_depth,
+                    lidar_mask = lidar_mask,
+                    lidar_confidence = lidar_confidence,
+                )
+                if lidar_raw_loss is not None:
+                    losses["opt"]["LiDARSparse"] = lidar_weight * lidar_raw_loss
+
             total_loss = sum(losses["opt"].values())
             if not torch.isfinite(total_loss):
                 print(f"  [WARNING] Non-finite loss at step {global_step}, skipping.")
@@ -405,6 +481,12 @@ def main():
                 for loss_name, loss_val in losses["opt"].items():
                     writer.add_scalar(f"train/loss_{loss_name}", loss_val.item(), global_step)
                 writer.add_scalar("train/lr", current_lr, global_step)
+                if lidar_raw_loss is not None and lidar_stats is not None:
+                    writer.add_scalar("train/lidar_loss_raw", lidar_raw_loss.item(), global_step)
+                    writer.add_scalar("train/lidar_valid_ratio", lidar_stats["valid_ratio"], global_step)
+                    writer.add_scalar("train/lidar_valid_pixels", lidar_stats["valid_pixels"], global_step)
+                    lidar_epoch_valid_ratio_sum += lidar_stats["valid_ratio"]
+                    lidar_epoch_steps += 1
 
                 # Log sample predicted and GT depth images
                 if "depth" in outputs:
@@ -414,6 +496,12 @@ def main():
         # ── End-of-epoch ─────────────────────────────────────────────────
         avg_loss = epoch_loss / max(num_batches, 1)
         writer.add_scalar("epoch/train_loss", avg_loss, epoch + 1)
+        if lidar_epoch_steps > 0:
+            writer.add_scalar(
+                "epoch/train_lidar_valid_ratio",
+                lidar_epoch_valid_ratio_sum / lidar_epoch_steps,
+                epoch + 1,
+            )
         print(f"\033[1mEpoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f} - LR: {current_lr:.6f}\033[0m")
 
         # Step the LR scheduler
@@ -425,11 +513,22 @@ def main():
             val_loss = 0.0
             val_batches = 0
             with torch.no_grad():
+                val_lidar_valid_ratio_sum = 0.0
+                val_lidar_steps = 0
                 for batch in val_loader:
                     image = batch["data"]["image"].to(device)
                     depth = batch["data"]["depth"].to(device)
                     depth_mask = batch["data"]["depth_mask"].to(device)
                     K = batch["data"]["K"].to(device)
+                    lidar_depth = batch["data"].get("lidar_depth", None)
+                    lidar_mask = batch["data"].get("lidar_mask", None)
+                    lidar_confidence = batch["data"].get("lidar_confidence", None)
+                    if lidar_depth is not None:
+                        lidar_depth = lidar_depth.to(device)
+                    if lidar_mask is not None:
+                        lidar_mask = lidar_mask.to(device)
+                    if lidar_confidence is not None:
+                        lidar_confidence = lidar_confidence.to(device)
                     camera = build_camera_from_batch(K)
                     inputs = {
                         "image": image,
@@ -441,12 +540,30 @@ def main():
                     # model is in eval() mode: forward() dispatches to forward_test
                     # which does NOT compute losses. We use forward_train explicitly
                     # so we can still get loss values for monitoring.
-                    _ , losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
+                    outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
+                    lidar_val_weight = train_cfg["losses"].get("lidar", {}).get("weight", 0.0)
+                    if lidar_val_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
+                        lidar_val_raw, lidar_val_stats = compute_lidar_sparse_loss(
+                            pred_depth = outputs_val["depth"],
+                            lidar_depth = lidar_depth,
+                            lidar_mask = lidar_mask,
+                            lidar_confidence = lidar_confidence,
+                        )
+                        if lidar_val_raw is not None:
+                            losses_val["opt"]["LiDARSparse"] = lidar_val_weight * lidar_val_raw
+                            val_lidar_valid_ratio_sum += lidar_val_stats["valid_ratio"]
+                            val_lidar_steps += 1
                     val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
 
             avg_val_loss = val_loss / max(val_batches, 1)
             writer.add_scalar("epoch/val_loss", avg_val_loss, epoch + 1)
+            if val_lidar_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_lidar_valid_ratio",
+                    val_lidar_valid_ratio_sum / val_lidar_steps,
+                    epoch + 1,
+                )
             print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 
         # ── Save checkpoint ───────────────────────────────────────────────
