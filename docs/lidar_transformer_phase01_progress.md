@@ -67,12 +67,47 @@
   - `epoch/train_lidar_valid_ratio`
   - `epoch/val_lidar_valid_ratio`
 
+### 5) Phase 3 已完成：Transformer late fusion 已接入模型
+
+已修改 `model/unidepthv1/decoder.py` 與 `model/unidepthv1/unidepthv1.py`：
+
+- 新增可開關的 late fusion：
+  - `use_lidar_fusion`（decoder config）
+- 融合方式：
+  - 將 `lidar_depth + lidar_mask + lidar_confidence` 編碼成 LiDAR token
+  - 在 1/16 尺度透過 attention prompt 融合到 depth latents
+  - 使用 learned gate 控制融合強度
+- 模型輸出新增融合監控資訊：
+  - `fusion_stats.lidar_used`
+  - `fusion_stats.lidar_valid_ratio`
+  - `fusion_stats.lidar_gate_mean`
+
+### 6) Phase 4 已完成：驗證與 fallback 監控已接入
+
+已修改 `train/train_depth.py`：
+
+- 加入 LiDAR dropout（訓練時隨機 drop LiDAR）：
+  - `--lidar_dropout_prob`
+- 加入 fallback 驗證（val 同時計算 RGB-only 與 RGB+LiDAR）：
+  - `--phase4_eval_fallback`
+  - 監控 RMSE gap（RGB-only − RGB+LiDAR）
+- 新增融合與 fallback 相關 TensorBoard 指標：
+  - `train/fusion_lidar_used`
+  - `train/fusion_lidar_valid_ratio`
+  - `train/fusion_lidar_gate_mean`
+  - `epoch/train_fusion_lidar_gate_mean`
+  - `epoch/train_lidar_dropout_ratio`
+  - `epoch/val_fusion_lidar_gate_mean`
+  - `epoch/val_rmse_with_lidar`
+  - `epoch/val_rmse_rgb_only_fallback`
+  - `epoch/val_rmse_gap_rgb_only_minus_lidar`
+
 ---
 
 ## 目前限制（What is NOT done yet）
 
-1. 尚未完成「LiDAR + Transformer 特徵融合」：
-  - 目前已完成 sparse supervision，但仍未加入 cross-attention / token fusion。
+1. 尚未完成 token fusion 消融：
+  - 目前已完成 late fusion，尚未完成 token-level fusion 分支。
 2. 尚未完成完整消融矩陣：
   - 尚未系統性比較 RGB-only、LiDAR supervision-only、LiDAR fusion。
 3. 尚未做標定誤差敏感度、跨場景泛化、缺失 LiDAR 退化測試。
@@ -81,30 +116,13 @@
 
 ## 下一步（Recommended Next Plan）
 
-### Phase 3：Transformer 融合（下一個主線）
+### 下一步 A：token fusion 消融
 
-1. 先做 late fusion（低風險）：
-  - LiDAR sparse depth 經輕量 encoder
-  - 在 decoder 中低解析度層插入 cross-attention
-2. 再做 token fusion 消融：
-  - 比較 late fusion vs token fusion
-3. 加入 LiDAR dropout：
-  - 避免模型過度依賴 LiDAR，保留 RGB-only 能力
-4. 補齊監控：
-  - fusion 層 attention 統計
-  - LiDAR 缺失時的性能退化曲線
+1. 加入 token-level fusion 分支。
+2. 對比 late fusion vs token fusion 在相同訓練 budget 下的結果。
+3. 比較記憶體/速度/精度 tradeoff，選最終方案。
 
-### Phase 4：驗證與上線前檢查
-
-1. 先做 late fusion（低風險）：
-   - LiDAR sparse depth 經輕量 encoder
-   - 在 decoder 中低解析度層插入 cross-attention
-2. 再做 token fusion 消融：
-   - 比較 late fusion vs token fusion
-3. 加入 LiDAR dropout：
-   - 避免模型過度依賴 LiDAR，保留 RGB-only 能力
-
-### Phase 5：驗證與上線前檢查
+### 下一步 B：完整 Phase 5 驗證
 
 1. 消融矩陣：
    - RGB-only
@@ -112,6 +130,8 @@
    - RGB + LiDAR fusion
 2. 場景/距離分桶評估，觀察遠距與邊界區域。
 3. LiDAR 缺失 fallback 測試（強制關 LiDAR）。
+4. 標定擾動敏感度測試（intrinsics/extrinsics 小擾動）。
+5. 跨場景泛化測試（房間/照明/材質分組）。
 
 ---
 
@@ -142,7 +162,20 @@ python -m train.train_depth \
   --val_root datasets/nyu_depth_v2_labeled.mat \
   --use_lidar true \
   --lidar_h5_key lidar_depths \
-  --lidar_loss_weight 0.5
+  --lidar_loss_weight 0.5 \
+  --use_lidar_fusion true \
+  --lidar_dropout_prob 0.2 \
+  --phase4_eval_fallback true
+```
+
+Phase 3 checkpoint 推論（需同架構）：
+
+```bash
+python -m infer.infer_depth \
+  --checkpoint runs/train_depth_xxx/checkpoints/epoch_100.pth \
+  --data_root datasets/nyu_depth_v2_labeled.mat \
+  --split test \
+  --use_lidar_fusion true
 ```
 
 或（若 LiDAR 在外部檔案）：
