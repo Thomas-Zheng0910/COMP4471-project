@@ -466,10 +466,12 @@ class NYUv2Dataset(Dataset):
                 else lidar_depth_np
             )
 
-            lidar_depth_tensor = self.depth_transform(lidar_depth_np)
-            lidar_depth_tensor = torch.clamp(lidar_depth_tensor, MIN_DEPTH, MAX_DEPTH)
-
-            lidar_mask_tensor = torch.isfinite(lidar_depth_tensor) & (lidar_depth_tensor > MIN_DEPTH)
+            lidar_depth_tensor_raw = self.depth_transform(lidar_depth_np)
+            lidar_mask_tensor = (
+                torch.isfinite(lidar_depth_tensor_raw)
+                & (lidar_depth_tensor_raw > MIN_DEPTH)
+            )
+            lidar_depth_tensor = torch.clamp(lidar_depth_tensor_raw, MIN_DEPTH, MAX_DEPTH)
             lidar_depth_tensor = torch.where(
                 lidar_mask_tensor,
                 lidar_depth_tensor,

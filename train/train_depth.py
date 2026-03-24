@@ -20,7 +20,7 @@ from time import time
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
 from data.nyuv2_dataset import NYUv2Dataset as ImageDataset
@@ -88,12 +88,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--lidar_h5_key', type=str, default=None)
     parser.add_argument('--lidar_confidence_h5_key', type=str, default=None)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--max_train_samples', type=int, default=0, help='Use first N training samples (0=all)')
+    parser.add_argument('--max_val_samples', type=int, default=0, help='Use first N validation samples (0=all)')
 
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
 
     # Script path for copying to experiment folder
     parser.add_argument('--script_path', type=str, default=None)
+    parser.add_argument('--run_name', type=str, default=None, help='Optional output run folder name under runs/')
 
     return parser.parse_args()
 
@@ -134,6 +137,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "wd": args.weight_decay,
             "log_every": args.log_every,
             "save_every": args.save_every,
+            "lidar_loss_weight": args.lidar_loss_weight,
             "losses": {
                 "depth": {
                     "name": args.depth_loss_name,
@@ -158,11 +162,6 @@ def build_config(args: argparse.Namespace) -> dict:
                     "weight": args.invariance_loss_weight,
                     "output_fn": "sqrt",
                 },
-                "lidar": {
-                    "name": "LiDARSparse",
-                    "weight": args.lidar_loss_weight,
-                    "fn": "log_l1",
-                },
             },
         },
         "data": {
@@ -176,6 +175,8 @@ def build_config(args: argparse.Namespace) -> dict:
             "lidar_h5_key": args.lidar_h5_key,
             "lidar_confidence_h5_key": args.lidar_confidence_h5_key,
             "num_workers": args.num_workers,
+            "max_train_samples": args.max_train_samples,
+            "max_val_samples": args.max_val_samples,
             "lidar_dropout_prob": args.lidar_dropout_prob,
             "phase4_eval_fallback": args.phase4_eval_fallback,
         },
@@ -230,7 +231,13 @@ def compute_lidar_sparse_loss(
         weighted mean(|log(pred) - log(lidar)|) on valid sparse pixels.
     """
 
-    valid = lidar_mask.bool()
+    valid = (
+        lidar_mask.bool()
+        & torch.isfinite(pred_depth)
+        & torch.isfinite(lidar_depth)
+        & (pred_depth > eps)
+        & (lidar_depth > eps)
+    )
     if not torch.any(valid):
         return None, {
             "valid_ratio": 0.0,
@@ -305,11 +312,16 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     # Set Device
-    device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        f"cuda:{args.cuda}" if (args.cuda is not None and args.cuda >= 0 and torch.cuda.is_available()) else "cpu"
+    )
     print(f"Using device: {device}")
 
     # Experiment output directory under ./runs/
-    log_dir = f"runs/train_depth_{int(time())}"
+    if args.run_name:
+        log_dir = args.run_name if args.run_name.startswith("runs/") else f"runs/{args.run_name}"
+    else:
+        log_dir = f"runs/train_depth_{int(time() * 1000)}_{os.getpid()}"
     os.makedirs(log_dir, exist_ok = True)
     print(f"\n\033[1mLogging to {log_dir}\033[0m")
     tensorboard_dir = f"{log_dir}/tensorboard"
@@ -344,6 +356,8 @@ def main():
         lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
     )
+    if data_cfg.get("max_train_samples", 0) and data_cfg["max_train_samples"] > 0:
+        train_dataset = Subset(train_dataset, range(min(data_cfg["max_train_samples"], len(train_dataset))))
     train_loader = DataLoader(
         train_dataset,
         batch_size = train_cfg["batch_size"],
@@ -370,6 +384,8 @@ def main():
             lidar_h5_key = data_cfg.get("lidar_h5_key", None),
             lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         )
+        if data_cfg.get("max_val_samples", 0) and data_cfg["max_val_samples"] > 0:
+            val_dataset = Subset(val_dataset, range(min(data_cfg["max_val_samples"], len(val_dataset))))
         val_loader = DataLoader(
             val_dataset,
             batch_size = train_cfg["batch_size"],
@@ -507,7 +523,7 @@ def main():
             # Compute total loss
             lidar_raw_loss = None
             lidar_stats = None
-            lidar_weight = train_cfg["losses"].get("lidar", {}).get("weight", 0.0)
+            lidar_weight = train_cfg.get("lidar_loss_weight", 0.0)
             if lidar_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs:
                 lidar_raw_loss, lidar_stats = compute_lidar_sparse_loss(
                     pred_depth = outputs["depth"],
@@ -632,7 +648,7 @@ def main():
                     # which does NOT compute losses. We use forward_train explicitly
                     # so we can still get loss values for monitoring.
                     outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
-                    lidar_val_weight = train_cfg["losses"].get("lidar", {}).get("weight", 0.0)
+                    lidar_val_weight = train_cfg.get("lidar_loss_weight", 0.0)
                     if lidar_val_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
                         lidar_val_raw, lidar_val_stats = compute_lidar_sparse_loss(
                             pred_depth = outputs_val["depth"],

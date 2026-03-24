@@ -1,3 +1,4 @@
+from typing import Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.nn as nn
@@ -41,7 +42,7 @@ def sample_strong_edges(edges_img, quantile=0.95, reshape=8):
 
 
 @torch.jit.script
-def extract_patches(tensor, sample_coords, patch_size: tuple[int, int] = (32, 32)):
+def extract_patches(tensor, sample_coords, patch_size: Tuple[int, int] = (32, 32)):
     N, _, H, W = tensor.shape
     device = tensor.device
     dtype = tensor.dtype
@@ -83,7 +84,7 @@ class LocalSSI(nn.Module):
         self,
         weight: float,
         output_fn: str = "sqrt",
-        patch_size: tuple[int, int] = (32, 32),
+        patch_size: Tuple[int, int] = (32, 32),
         min_samples: int = 4,
         num_levels: int = 4,
         input_fn: str = "linear",
@@ -313,8 +314,8 @@ class EdgeGuidedLocalSSI(nn.Module):
         input: torch.Tensor,
         target: torch.Tensor,
         mask: torch.Tensor,
-        image: torch.Tensor | None = None,
-        validity_mask: torch.Tensor | None = None,
+        image: Optional[torch.Tensor] = None,
+        validity_mask: Optional[torch.Tensor] = None,
         *args,
         **kwargs,
     ) -> torch.Tensor:

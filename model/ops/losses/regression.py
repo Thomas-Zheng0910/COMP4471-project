@@ -1,3 +1,4 @@
+from typing import List, Optional, Union
 import torch
 import torch.nn as nn
 
@@ -13,7 +14,7 @@ class Regression(nn.Module):
         alpha: float,
         gamma: float,
         fn: str,
-        dims: list[int] = [-1],
+        dims: List[int] = [-1],
         quantile: float = 0.0,
         **kwargs,
     ):
@@ -33,7 +34,7 @@ class Regression(nn.Module):
         self,
         input: torch.Tensor,
         target: torch.Tensor,
-        mask: torch.Tensor | None = None,
+        mask: Optional[torch.Tensor] = None,
         **kwargs,
     ) -> torch.Tensor:
         if mask is not None:  # usually it is just repeated

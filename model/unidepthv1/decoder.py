@@ -3,7 +3,7 @@ Author: Luigi Piccinelli
 Licensed under the CC-BY NC 4.0 license (http://creativecommons.org/licenses/by-nc/4.0/)
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -20,7 +20,7 @@ from utils.sht import rsh_cart_8
 
 
 class ListAdapter(nn.Module):
-        depths: Union[int, List[int]] = 4,
+    def __init__(self, input_dims: List[int], hidden_dim: int):
         super().__init__()
         self.input_adapters = nn.ModuleList([])
         self.num_chunks = len(input_dims)
@@ -114,7 +114,7 @@ class DepthHead(nn.Module):
         hidden_dim: int,
         num_heads: int = 8,
         expansion: int = 4,
-        depths: int | list[int] = 4,
+        depths: Union[int, List[int]] = 4,
         camera_dim: int = 256,
         num_resolutions: int = 4,
         dropout: float = 0.0,

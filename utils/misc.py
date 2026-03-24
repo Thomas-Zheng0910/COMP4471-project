@@ -5,6 +5,7 @@ Licensed under the CC-BY NC 4.0 license (http://creativecommons.org/licenses/by-
 
 from functools import wraps
 from time import time
+from typing import Optional, List
 
 import numpy as np
 import torch
@@ -15,23 +16,23 @@ from scipy import interpolate
 
 
 @torch.jit.script
-def max_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+def max_stack(tensors: List[torch.Tensor]) -> torch.Tensor:
     if len(tensors) == 1:
         return tensors[0]
     return torch.stack(tensors, dim=-1).max(dim=-1).values
 
 
-def last_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+def last_stack(tensors: List[torch.Tensor]) -> torch.Tensor:
     return tensors[-1]
 
 
-def first_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+def first_stack(tensors: List[torch.Tensor]) -> torch.Tensor:
     return tensors[0]
 
 
 @torch.jit.script
 def softmax_stack(
-    tensors: list[torch.Tensor], temperature: float = 1.0
+    tensors: List[torch.Tensor], temperature: float = 1.0
 ) -> torch.Tensor:
     if len(tensors) == 1:
         return tensors[0]
@@ -39,14 +40,14 @@ def softmax_stack(
 
 
 @torch.jit.script
-def mean_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+def mean_stack(tensors: List[torch.Tensor]) -> torch.Tensor:
     if len(tensors) == 1:
         return tensors[0]
     return torch.stack(tensors, dim=-1).mean(dim=-1)
 
 
 @torch.jit.script
-def sum_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+def sum_stack(tensors: List[torch.Tensor]) -> torch.Tensor:
     if len(tensors) == 1:
         return tensors[0]
     return torch.stack(tensors, dim=-1).sum(dim=-1)
@@ -282,8 +283,8 @@ def recursive_to(infos, device, non_blocking, cls):
 
 def masked_mean(
     data: torch.Tensor,
-    mask: torch.Tensor | None = None,
-    dim: list[int] | None = None,
+    mask: Optional[torch.Tensor] = None,
+    dim: Optional[List[int]] = None,
     keepdim: bool = False,
 ) -> torch.Tensor:
     dim = dim if dim is not None else list(range(data.dim()))

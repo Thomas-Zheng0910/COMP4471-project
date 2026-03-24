@@ -38,3 +38,7 @@ data/*
 # Ignore cache directories
 cache/
 ./cache/
+
+# scripts
+/scripts/
+docs/figures/

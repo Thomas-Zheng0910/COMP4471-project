@@ -1,3 +1,4 @@
+from typing import List
 import torch
 import torch.nn as nn
 
@@ -12,7 +13,7 @@ class SILog(nn.Module):
         input_fn: str = "linear",
         output_fn: str = "sqrt",
         integrated: float = 0.15,
-        dims: list[int] = [-3, -2, -1],
+        dims: List[int] = [-3, -2, -1],
         eps: float = 1e-5,
     ):
         super().__init__()
