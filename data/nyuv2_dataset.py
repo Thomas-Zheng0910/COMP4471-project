@@ -492,8 +492,13 @@ class NYUv2Dataset(Dataset):
         if self.split == "test":
             depth_tensor = self._apply_eval_mask(depth_tensor)
 
-        # Depth mask (all pixels are valid for NYUv2 dense GT)
-        depth_mask = torch.ones_like(depth_tensor, dtype = torch.bool)
+        # Depth mask (valid pixels only). For test split this naturally excludes
+        # regions outside eval crop because they are zeroed by _apply_eval_mask.
+        depth_mask = (
+            torch.isfinite(depth_tensor)
+            & (depth_tensor > MIN_DEPTH)
+            & (depth_tensor <= MAX_DEPTH)
+        )
 
         if self.flip_aug:
             # Return (original, horizontally-flipped) pair so the collate_fn

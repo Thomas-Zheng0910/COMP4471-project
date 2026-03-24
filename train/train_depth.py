@@ -276,6 +276,15 @@ def compute_depth_rmse(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask
     return torch.sqrt(mse)
 
 
+def compute_depth_abs_rel(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    valid = gt_mask.bool() & torch.isfinite(pred_depth) & torch.isfinite(gt_depth)
+    if not torch.any(valid):
+        return torch.tensor(0.0, device=pred_depth.device)
+    denom = torch.clamp(gt_depth[valid], min=eps)
+    abs_rel = torch.abs(pred_depth[valid] - gt_depth[valid]) / denom
+    return abs_rel.mean()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main training loop
 # ──────────────────────────────────────────────────────────────────────────────
@@ -614,6 +623,9 @@ def main():
                 val_lidar_steps = 0
                 val_fusion_gate_mean_sum = 0.0
                 val_fusion_steps = 0
+                val_rmse_sum = 0.0
+                val_abs_rel_sum = 0.0
+                val_metric_steps = 0
                 val_rmse_with_lidar_sum = 0.0
                 val_rmse_rgb_only_sum = 0.0
                 val_rmse_compare_steps = 0
@@ -666,6 +678,13 @@ def main():
                         val_fusion_gate_mean_sum += float(fusion_stats_val["lidar_gate_mean"].item())
                         val_fusion_steps += 1
 
+                    if "depth" in outputs_val:
+                        rmse_val = compute_depth_rmse(outputs_val["depth"], depth, depth_mask)
+                        abs_rel_val = compute_depth_abs_rel(outputs_val["depth"], depth, depth_mask)
+                        val_rmse_sum += float(rmse_val.item())
+                        val_abs_rel_sum += float(abs_rel_val.item())
+                        val_metric_steps += 1
+
                     # Phase 4: fallback check (RGB-only) during validation.
                     if (
                         data_cfg.get("phase4_eval_fallback", True)
@@ -694,6 +713,17 @@ def main():
 
             avg_val_loss = val_loss / max(val_batches, 1)
             writer.add_scalar("epoch/val_loss", avg_val_loss, epoch + 1)
+            if val_metric_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_rmse",
+                    val_rmse_sum / val_metric_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_abs_rel",
+                    val_abs_rel_sum / val_metric_steps,
+                    epoch + 1,
+                )
             if val_lidar_steps > 0:
                 writer.add_scalar(
                     "epoch/val_lidar_valid_ratio",
@@ -722,7 +752,12 @@ def main():
                     (val_rmse_rgb_only_sum - val_rmse_with_lidar_sum) / val_rmse_compare_steps,
                     epoch + 1,
                 )
-            print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
+            if val_metric_steps > 0:
+                avg_val_rmse = val_rmse_sum / val_metric_steps
+                avg_val_abs_rel = val_abs_rel_sum / val_metric_steps
+                print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f}\033[0m")
+            else:
+                print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 
         # ── Save checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % save_every == 0:

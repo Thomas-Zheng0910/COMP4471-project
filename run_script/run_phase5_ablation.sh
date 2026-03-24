@@ -11,8 +11,8 @@ set -e
 MAT_PATH="${1:-datasets/nyu_depth_v2_labeled.mat}"
 LIDAR_H5_KEY="${2:-auto}"
 LIDAR_ROOT="${3:-}"
-EPOCHS="${4:-20}"
-SAVE_EVERY=20
+EPOCHS="${4:-15}"
+SAVE_EVERY=15
 BATCH_SIZE="${5:-2}"
 GPU_LIST_RAW="${6:-4,6,7,0}"
 BATCH_SIZE_FUSION="${7:-$BATCH_SIZE}"
