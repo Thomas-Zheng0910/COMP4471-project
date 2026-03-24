@@ -81,7 +81,7 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--train_root', type=str, default=None)
     parser.add_argument('--val_root', type=str, default=None)
     parser.add_argument('--image_shape', type=int, nargs=2, default=[384, 384])
-    parser.add_argument('--depth_scale', type=float, default=0.001)
+    parser.add_argument('--depth_scale', type=float, default=1.0)
     parser.add_argument('--use_lidar', type=lambda x: x.lower() == 'true', default=False)
     parser.add_argument('--lidar_root', type=str, default=None)
     parser.add_argument('--lidar_depth_scale', type=float, default=1.0)
@@ -348,7 +348,7 @@ def main():
         root = data_cfg["train_root"],
         split = "train",
         image_shape = data_cfg["image_shape"],
-        depth_scale = data_cfg.get("depth_scale", 0.001),
+        depth_scale = data_cfg.get("depth_scale", 1.0),
         use_lidar = data_cfg.get("use_lidar", False),
         lidar_root = data_cfg.get("lidar_root", None),
         lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
@@ -377,7 +377,7 @@ def main():
             root = data_cfg["val_root"],
             split = "test",
             image_shape = data_cfg["image_shape"],
-            depth_scale = data_cfg.get("depth_scale", 0.001),
+            depth_scale = data_cfg.get("depth_scale", 1.0),
             use_lidar = data_cfg.get("use_lidar", False),
             lidar_root = data_cfg.get("lidar_root", None),
             lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),

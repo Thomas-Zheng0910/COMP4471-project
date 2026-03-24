@@ -159,7 +159,7 @@ def validate_ablation_framework():
                 self.train_root = None
                 self.val_root = None
                 self.image_shape = [384, 384]
-                self.depth_scale = 0.001
+                self.depth_scale = 1.0
                 self.use_lidar = expected_config.get('use_lidar', False)
                 self.lidar_root = None
                 self.lidar_depth_scale = 1.0

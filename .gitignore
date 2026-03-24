@@ -42,3 +42,4 @@ cache/
 # scripts
 /scripts/
 docs/figures/
+docs/phase5_lidar_vs_rgb_diagnosis.md

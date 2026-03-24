@@ -11,17 +11,15 @@ set -e
 MAT_PATH="${1:-datasets/nyu_depth_v2_labeled.mat}"
 LIDAR_H5_KEY="${2:-auto}"
 LIDAR_ROOT="${3:-}"
-EPOCHS="${4:-35}"
-SAVE_EVERY=35
-BATCH_SIZE="${5:-4}"
+EPOCHS="${4:-20}"
+SAVE_EVERY=20
+BATCH_SIZE="${5:-2}"
 GPU_LIST_RAW="${6:-4,6,7,0}"
-BATCH_SIZE_FUSION="${7:-2}"
+BATCH_SIZE_FUSION="${7:-$BATCH_SIZE}"
 USE_TMUX="${8:-true}"
-if [ "$BATCH_SIZE" -gt 1 ]; then
-  BATCH_SIZE_SUPERVISION=$((BATCH_SIZE / 2))
-else
-  BATCH_SIZE_SUPERVISION=1
-fi
+DEPTH_SCALE="${DEPTH_SCALE:-1.0}"
+LIDAR_DEPTH_SCALE="${LIDAR_DEPTH_SCALE:-1.0}"
+LIDAR_DROPOUT_PROB="${LIDAR_DROPOUT_PROB:-0.0}"
 
 PYTHON_BIN="${PYTHON_BIN:-/localdata/yhip/COMP4471-project/.venv/bin/python}"
 if [ ! -x "$PYTHON_BIN" ]; then
@@ -49,9 +47,11 @@ echo "LIDAR_H5_KEY (requested): $LIDAR_H5_KEY"
 echo "LIDAR_ROOT: $LIDAR_ROOT"
 echo "EPOCHS: $EPOCHS"
 echo "BATCH_SIZE: $BATCH_SIZE"
-echo "BATCH_SIZE_SUPERVISION (auto): $BATCH_SIZE_SUPERVISION"
 echo "GPU_LIST_RAW: $GPU_LIST_RAW"
-echo "BATCH_SIZE_FUSION: $BATCH_SIZE_FUSION"
+echo "BATCH_SIZE_FUSION (legacy arg): $BATCH_SIZE_FUSION"
+echo "DEPTH_SCALE: $DEPTH_SCALE"
+echo "LIDAR_DEPTH_SCALE: $LIDAR_DEPTH_SCALE"
+echo "LIDAR_DROPOUT_PROB: $LIDAR_DROPOUT_PROB"
 echo "=========================================="
 echo ""
 
@@ -76,6 +76,8 @@ COMMON_ARGS=(
   --val_root "$MAT_PATH"
   --epochs "$EPOCHS"
   --batch_size "$BATCH_SIZE"
+  --depth_scale "$DEPTH_SCALE"
+  --lidar_depth_scale "$LIDAR_DEPTH_SCALE"
   --image_shape 384 384
   --encoder_name convnextv2_large
   --hidden_dim 512
@@ -90,6 +92,7 @@ COMMON_ARGS=(
   --save_every "$SAVE_EVERY"
   --log_every 50
   --num_workers 4
+  --lidar_dropout_prob "$LIDAR_DROPOUT_PROB"
   --phase4_eval_fallback true
 )
 
@@ -292,9 +295,9 @@ echo ""
 
 # Launch all 4 variants in parallel
 start_variant_bg "RGB-only" "rgb_only" "${GPU_POOL[0]}" "$RESULT_RGB"
-start_variant_bg "Supervision-only" "supervision_only" "${GPU_POOL[1]}" "$RESULT_SUP" --batch_size "$BATCH_SIZE_SUPERVISION"
-start_variant_bg "Late fusion" "late_fusion" "${GPU_POOL[2]}" "$RESULT_LATE" --batch_size "$BATCH_SIZE_FUSION" --lidar_fusion_type late --lidar_dropout_prob 0.2
-start_variant_bg "Token fusion" "token_fusion" "${GPU_POOL[3]}" "$RESULT_TOKEN" --batch_size "$BATCH_SIZE_FUSION" --lidar_fusion_type token --lidar_dropout_prob 0.2
+start_variant_bg "Supervision-only" "supervision_only" "${GPU_POOL[1]}" "$RESULT_SUP"
+start_variant_bg "Late fusion" "late_fusion" "${GPU_POOL[2]}" "$RESULT_LATE" --lidar_fusion_type late
+start_variant_bg "Token fusion" "token_fusion" "${GPU_POOL[3]}" "$RESULT_TOKEN" --lidar_fusion_type token
 
 while [ "${#PID_TO_GPU[@]}" -gt 0 ]; do
   for pid in "${!PID_TO_GPU[@]}"; do
