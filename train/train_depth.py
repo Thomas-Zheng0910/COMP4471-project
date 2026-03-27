@@ -80,6 +80,9 @@ def get_args() -> argparse.Namespace:
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
     parser.add_argument('--val_root', type=str, default=None)
+    parser.add_argument('--train_split', type=str, default='train', help='Training split name')
+    parser.add_argument('--val_split', type=str, default='val', help='Validation split name (falls back to test if val does not exist)')
+    parser.add_argument('--test_split', type=str, default='test', help='Test split name (for final evaluation only, not used during training)')
     parser.add_argument('--image_shape', type=int, nargs=2, default=[384, 384])
     parser.add_argument('--depth_scale', type=float, default=1.0)
     parser.add_argument('--use_lidar', type=lambda x: x.lower() == 'true', default=False)
@@ -167,6 +170,9 @@ def build_config(args: argparse.Namespace) -> dict:
         "data": {
             "train_root": args.train_root,
             "val_root": args.val_root,
+            "train_split": args.train_split,
+            "val_split": args.val_split,
+            "test_split": args.test_split,
             "image_shape": args.image_shape,
             "depth_scale": args.depth_scale,
             "use_lidar": args.use_lidar,
@@ -355,7 +361,7 @@ def main():
 
     train_dataset = ImageDataset(
         root = data_cfg["train_root"],
-        split = "train",
+        split = data_cfg.get("train_split", "train"),
         image_shape = data_cfg["image_shape"],
         depth_scale = data_cfg.get("depth_scale", 1.0),
         use_lidar = data_cfg.get("use_lidar", False),
@@ -378,21 +384,37 @@ def main():
     )
 
     # Optional validation loader
-    # NOTE: We only have 2 splits, originally was train/test
-    #       we call it val for now.
+    # NOTE: New protocol: use val_split if available, else fall back to test_split (for backward compat)
     val_loader = None
     if data_cfg.get("val_root") is not None:
-        val_dataset = ImageDataset(
-            root = data_cfg["val_root"],
-            split = "test",
-            image_shape = data_cfg["image_shape"],
-            depth_scale = data_cfg.get("depth_scale", 1.0),
-            use_lidar = data_cfg.get("use_lidar", False),
-            lidar_root = data_cfg.get("lidar_root", None),
-            lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
-            lidar_h5_key = data_cfg.get("lidar_h5_key", None),
-            lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
-        )
+        val_split_name = data_cfg.get("val_split", "val")
+        try:
+            val_dataset = ImageDataset(
+                root = data_cfg["val_root"],
+                split = val_split_name,
+                image_shape = data_cfg["image_shape"],
+                depth_scale = data_cfg.get("depth_scale", 1.0),
+                use_lidar = data_cfg.get("use_lidar", False),
+                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+                lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+                lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
+            )
+        except ValueError:
+            # Fallback: if val_split does not exist, try test_split (legacy compat)
+            test_split_name = data_cfg.get("test_split", "test")
+            val_dataset = ImageDataset(
+                root = data_cfg["val_root"],
+                split = test_split_name,
+                image_shape = data_cfg["image_shape"],
+                depth_scale = data_cfg.get("depth_scale", 1.0),
+                use_lidar = data_cfg.get("use_lidar", False),
+                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+                lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+                lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
+            )
+            print(f"\033[93m[WARN] val_split '{val_split_name}' not available; fell back to test_split '{test_split_name}'\033[0m")
         if data_cfg.get("max_val_samples", 0) and data_cfg["max_val_samples"] > 0:
             val_dataset = Subset(val_dataset, range(min(data_cfg["max_val_samples"], len(val_dataset))))
         val_loader = DataLoader(

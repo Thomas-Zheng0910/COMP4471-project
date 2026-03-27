@@ -182,6 +182,9 @@ class NYUv2Dataset(Dataset):
         lidar_h5_key: Optional[str] = None,
         lidar_confidence_h5_key: Optional[str] = None,
         split: str = "train",
+        split_indices_file: Optional[str] = None,
+        val_ratio: float = 0.1,
+        val_seed: int = 42,
         flip_aug: bool = False,
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
@@ -189,8 +192,8 @@ class NYUv2Dataset(Dataset):
     ) -> None:
         super().__init__()
 
-        assert split in ("train", "test", "all"), (
-            f"split must be one of 'train', 'test', 'all', got '{split}'."
+        assert split in ("train", "val", "test", "all"), (
+            f"split must be one of 'train', 'val', 'test', 'all', got '{split}'."
         )
 
         self.mat_path = root
@@ -204,6 +207,9 @@ class NYUv2Dataset(Dataset):
         self.lidar_depth_scale = lidar_depth_scale
         self.lidar_h5_key = lidar_h5_key
         self.lidar_confidence_h5_key = lidar_confidence_h5_key
+        self.split_indices_file = split_indices_file
+        self.val_ratio = float(val_ratio)
+        self.val_seed = int(val_seed)
 
         self.image_transform = (
             image_transform if image_transform is not None else _default_image_transform(self.image_shape if self.image_shape != (480, 640) else None)
@@ -249,15 +255,20 @@ class NYUv2Dataset(Dataset):
                 )
         h5.close()
 
-        test_set = set(self._EIGEN_TEST_INDICES)
-        all_indices = list(range(total))
-
-        if split == "train":
-            self.indices = [i for i in all_indices if i not in test_set]
-        elif split == "test":
-            self.indices = [i for i in all_indices if i in test_set]
+        if split_indices_file is not None:
+            self.indices = self._load_indices_from_file(split_indices_file, total)
         else:
-            self.indices = all_indices
+            split_map = self.build_standard_train_val_test_splits(
+                total=total,
+                val_ratio=self.val_ratio,
+                seed=self.val_seed,
+            )
+            if split == "all":
+                self.indices = list(range(total))
+            elif split in split_map:
+                self.indices = split_map[split]
+            else:
+                raise ValueError(f"Unsupported split '{split}'.")
 
         # Lazy per-worker file handle
         self._h5: Optional[h5py.File] = None
@@ -315,6 +326,73 @@ class NYUv2Dataset(Dataset):
                 lidar_conf = None
 
         return lidar_depth, lidar_conf
+
+    @classmethod
+    def build_standard_train_val_test_splits(
+        cls,
+        total: int,
+        val_ratio: float = 0.1,
+        seed: int = 42,
+    ) -> Dict[str, List[int]]:
+        """
+        Build deterministic train/val/test indices.
+
+        - test: official Eigen split (654 images)
+        - train/val: partition of non-test subset with fixed RNG seed
+        """
+
+        if total <= 0:
+            return {"train": [], "val": [], "test": []}
+
+        ratio = float(np.clip(val_ratio, 0.0, 0.5))
+        test_set = {i for i in cls._EIGEN_TEST_INDICES if 0 <= i < total}
+        all_indices = list(range(total))
+        train_pool = [i for i in all_indices if i not in test_set]
+        test_indices = sorted(i for i in all_indices if i in test_set)
+
+        if len(train_pool) <= 1 or ratio <= 0.0:
+            return {
+                "train": sorted(train_pool),
+                "val": [],
+                "test": test_indices,
+            }
+
+        rng = np.random.default_rng(seed)
+        shuffled = np.array(train_pool, dtype=np.int64)
+        rng.shuffle(shuffled)
+        n_val = int(round(len(shuffled) * ratio))
+        n_val = max(1, min(len(shuffled) - 1, n_val))
+
+        val_indices = sorted(shuffled[:n_val].tolist())
+        train_indices = sorted(shuffled[n_val:].tolist())
+        return {
+            "train": train_indices,
+            "val": val_indices,
+            "test": test_indices,
+        }
+
+    @staticmethod
+    def _load_indices_from_file(split_file: str, total: int) -> List[int]:
+        path = Path(split_file)
+        if not path.is_file():
+            raise FileNotFoundError(f"Split file not found: {split_file}")
+
+        indices: List[int] = []
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            idx = int(line)
+            if idx < 0 or idx >= total:
+                raise ValueError(
+                    f"Split index {idx} in '{split_file}' is out of range [0, {total - 1}]"
+                )
+            indices.append(idx)
+
+        deduped = sorted(set(indices))
+        if len(deduped) != len(indices):
+            raise ValueError(f"Split file '{split_file}' contains duplicate indices.")
+        return deduped
 
     def _load_lidar(self, h5: h5py.File, mat_idx: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
         """
