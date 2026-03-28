@@ -23,7 +23,7 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageFile
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
@@ -35,6 +35,9 @@ from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 IMAGE_EXTS: Sequence[str] = (".jpg", ".jpeg", ".png")
 DEPTH_COLORMAP_RANGE = (0.01, 10.0)  # metres
 UINT16_MAX = 65534  # avoid potential wrap-around at 65535
+
+# Allow loading of truncated images (some D4RD images are slightly corrupted)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # Arg-parser
 def parse_args() -> argparse.Namespace:
