@@ -27,7 +27,10 @@ SUBDIRS=(...)
 # Output suffix for depth maps
 OUTPUT_SUFFIX="_depth_anything"
 # Model ID for DepthAnything (HuggingFace)
-MODEL_ID="depth-anything/Depth-Anything-V2-Large-hf"
+# NOTE: Please use the "indoor" or "outdoor" model based on the dataset type
+#       if use the "small" model, the generated depth maps are relative depths
+#       NOT metric depths (in metres).
+MODEL_ID="depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
 # Device to use (e.g. "0" for cuda:0, "cpu" for CPU)
 CUDA_DEVICE="0"
 # Whether to overwrite existing depth maps

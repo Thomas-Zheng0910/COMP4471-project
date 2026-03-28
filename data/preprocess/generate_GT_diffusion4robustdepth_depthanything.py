@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 from utils.visualization import colorize
 
@@ -185,10 +186,21 @@ def run_inference_depth_anything(
 
     # Optionally save a colorized visualization for quick sanity check
     if save_vis:
-        vmin, vmax = DEPTH_COLORMAP_RANGE
-        vis = colorize(depth_np, vmin = vmin, vmax = vmax, cmap = "magma_r")
         vis_path = output_path.with_name(output_path.stem + "_vis.png")
-        Image.fromarray(vis).save(vis_path)
+        vmin, vmax = DEPTH_COLORMAP_RANGE
+        # Use matplotlib to save the visualization
+        # Previously BAD BAD
+        fig, axes = plt.subplots(1, 2, figsize = (12, 6))
+        axes[0].imshow(image)
+        axes[0].set_title("RGB Image")
+        axes[0].axis("off")
+        im = axes[1].imshow(depth_np, cmap = "magma", vmin = vmin, vmax = vmax)
+        axes[1].set_title("Depth Map (colorized)")
+        axes[1].axis("off")
+        fig.colorbar(im, ax = axes[1], fraction = 0.046, pad = 0.04, label = "Depth (m)")
+        plt.tight_layout()
+        plt.savefig(vis_path)
+        plt.close(fig)
 
 # Main function
 def main() -> None:
