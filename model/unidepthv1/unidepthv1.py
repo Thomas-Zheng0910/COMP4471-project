@@ -194,7 +194,7 @@ class UniDepthV1(
         inputs["cls_tokens"] = cls_tokens
 
         # Decode
-        pred_intrinsics, predictions, depth_features = self.pixel_decoder.forward(inputs, {})
+        pred_intrinsics, predictions, depth_features, fusion_stats = self.pixel_decoder.forward(inputs, {})
         predictions = sum(
             [
                 F.interpolate(
@@ -227,6 +227,7 @@ class UniDepthV1(
             "points": points_3d,
             "depth": predictions[:, -1:],
             "cond_features": depth_features,
+            "fusion_stats": fusion_stats,
         }
         self.pixel_decoder.test_fixed_camera = False
         outputs["rays"] = rearrange(outputs["rays"], "b (h w) c -> b c h w", h=H, w=W)
@@ -343,7 +344,7 @@ class UniDepthV1(
             self.pixel_decoder.skip_camera = skip_camera
 
         # decode all
-        pred_intrinsics, predictions, _ = self.pixel_decoder(inputs, {})
+        pred_intrinsics, predictions, _, _ = self.pixel_decoder(inputs, {})
 
         # undo the reshaping and get original image size (slow)
         predictions, pred_intrinsics = _postprocess(

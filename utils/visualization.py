@@ -3,6 +3,7 @@ Author: Luigi Piccinelli
 Licensed under the CC-BY NC 4.0 license (http://creativecommons.org/licenses/by-nc/4.0/)
 """
 
+from typing import List
 import os
 
 import matplotlib.pyplot as plt
@@ -35,7 +36,7 @@ def colorize(
     return img
 
 
-def image_grid(imgs: list[np.ndarray], rows: int, cols: int) -> np.ndarray:
+def image_grid(imgs: List[np.ndarray], rows: int, cols: int) -> np.ndarray:
     if not len(imgs):
         return None
     assert len(imgs) == rows * cols

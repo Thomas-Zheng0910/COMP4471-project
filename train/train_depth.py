@@ -20,7 +20,7 @@ from time import time
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
 from data.nyuv2_dataset import NYUv2Dataset as ImageDataset
@@ -58,6 +58,15 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--depths', type=int, nargs='+', default=[1, 2, 3])
     parser.add_argument('--num_heads', type=int, default=8)
     parser.add_argument('--expansion', type=int, default=4)
+    parser.add_argument('--use_lidar_fusion', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--lidar_fusion_type', type=str, default='late', choices=['late', 'token'], help='Fusion type: late (1/16 scale) or token (multi-scale)')
+    parser.add_argument('--lidar_dropout_prob', type=float, default=0.0)
+    parser.add_argument('--phase4_eval_fallback', type=lambda x: x.lower() == 'true', default=True)
+    
+    # Phase 5 ablation configuration
+    parser.add_argument('--phase5_ablation', type=str, default=None, 
+                        choices=['rgb_only', 'supervision_only', 'late_fusion', 'token_fusion'],
+                        help='Phase 5 ablation: train specific variant')
 
     # Loss configuration
     parser.add_argument('--depth_loss_name', type=str, default='SILog')
@@ -66,19 +75,31 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--camera_loss_weight', type=float, default=0.5)
     parser.add_argument('--invariance_loss_name', type=str, default='SelfDistill')
     parser.add_argument('--invariance_loss_weight', type=float, default=0.1)
+    parser.add_argument('--lidar_loss_weight', type=float, default=0.5)
 
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
     parser.add_argument('--val_root', type=str, default=None)
+    parser.add_argument('--train_split', type=str, default='train', help='Training split name')
+    parser.add_argument('--val_split', type=str, default='val', help='Validation split name (falls back to test if val does not exist)')
+    parser.add_argument('--test_split', type=str, default='test', help='Test split name (for final evaluation only, not used during training)')
     parser.add_argument('--image_shape', type=int, nargs=2, default=[384, 384])
-    parser.add_argument('--depth_scale', type=float, default=0.001)
+    parser.add_argument('--depth_scale', type=float, default=1.0)
+    parser.add_argument('--use_lidar', type=lambda x: x.lower() == 'true', default=False)
+    parser.add_argument('--lidar_root', type=str, default=None)
+    parser.add_argument('--lidar_depth_scale', type=float, default=1.0)
+    parser.add_argument('--lidar_h5_key', type=str, default=None)
+    parser.add_argument('--lidar_confidence_h5_key', type=str, default=None)
     parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--max_train_samples', type=int, default=0, help='Use first N training samples (0=all)')
+    parser.add_argument('--max_val_samples', type=int, default=0, help='Use first N validation samples (0=all)')
 
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
 
     # Script path for copying to experiment folder
     parser.add_argument('--script_path', type=str, default=None)
+    parser.add_argument('--run_name', type=str, default=None, help='Optional output run folder name under runs/')
 
     return parser.parse_args()
 
@@ -105,6 +126,8 @@ def build_config(args: argparse.Namespace) -> dict:
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
                 "depths": args.depths,
+                "use_lidar_fusion": args.use_lidar_fusion,
+                "lidar_fusion_type": args.lidar_fusion_type,
             },
             "num_heads": args.num_heads,
             "expansion": args.expansion,
@@ -117,6 +140,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "wd": args.weight_decay,
             "log_every": args.log_every,
             "save_every": args.save_every,
+            "lidar_loss_weight": args.lidar_loss_weight,
             "losses": {
                 "depth": {
                     "name": args.depth_loss_name,
@@ -146,9 +170,21 @@ def build_config(args: argparse.Namespace) -> dict:
         "data": {
             "train_root": args.train_root,
             "val_root": args.val_root,
+            "train_split": args.train_split,
+            "val_split": args.val_split,
+            "test_split": args.test_split,
             "image_shape": args.image_shape,
             "depth_scale": args.depth_scale,
+            "use_lidar": args.use_lidar,
+            "lidar_root": args.lidar_root,
+            "lidar_depth_scale": args.lidar_depth_scale,
+            "lidar_h5_key": args.lidar_h5_key,
+            "lidar_confidence_h5_key": args.lidar_confidence_h5_key,
             "num_workers": args.num_workers,
+            "max_train_samples": args.max_train_samples,
+            "max_val_samples": args.max_val_samples,
+            "lidar_dropout_prob": args.lidar_dropout_prob,
+            "phase4_eval_fallback": args.phase4_eval_fallback,
         },
     }
 
@@ -188,6 +224,73 @@ def save_checkpoint(state: dict, path: str):
     print(f"  Checkpoint saved -> {path}")
 
 
+def compute_lidar_sparse_loss(
+    pred_depth: torch.Tensor,
+    lidar_depth: torch.Tensor,
+    lidar_mask: torch.Tensor,
+    lidar_confidence: torch.Tensor = None,
+    eps: float = 1e-6,
+):
+
+    """
+    Phase 2 sparse LiDAR supervision:
+        weighted mean(|log(pred) - log(lidar)|) on valid sparse pixels.
+    """
+
+    valid = (
+        lidar_mask.bool()
+        & torch.isfinite(pred_depth)
+        & torch.isfinite(lidar_depth)
+        & (pred_depth > eps)
+        & (lidar_depth > eps)
+    )
+    if not torch.any(valid):
+        return None, {
+            "valid_ratio": 0.0,
+            "valid_pixels": 0,
+        }
+
+    if lidar_confidence is not None:
+        weights = torch.clamp(lidar_confidence, min = 0.0) * valid.float()
+    else:
+        weights = valid.float()
+
+    weight_sum = weights.sum()
+    if weight_sum <= 0:
+        return None, {
+            "valid_ratio": float(valid.float().mean().item()),
+            "valid_pixels": int(valid.sum().item()),
+        }
+
+    pred_log = torch.log(torch.clamp(pred_depth, min = eps))
+    lidar_log = torch.log(torch.clamp(lidar_depth, min = eps))
+    abs_log_diff = torch.abs(pred_log - lidar_log)
+
+    sparse_loss = (abs_log_diff * weights).sum() / weight_sum
+    stats = {
+        "valid_ratio": float(valid.float().mean().item()),
+        "valid_pixels": int(valid.sum().item()),
+    }
+    return sparse_loss, stats
+
+
+def compute_depth_rmse(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor) -> torch.Tensor:
+    valid = gt_mask.bool()
+    if not torch.any(valid):
+        return torch.tensor(0.0, device=pred_depth.device)
+    mse = ((pred_depth[valid] - gt_depth[valid]) ** 2).mean()
+    return torch.sqrt(mse)
+
+
+def compute_depth_abs_rel(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    valid = gt_mask.bool() & torch.isfinite(pred_depth) & torch.isfinite(gt_depth)
+    if not torch.any(valid):
+        return torch.tensor(0.0, device=pred_depth.device)
+    denom = torch.clamp(gt_depth[valid], min=eps)
+    abs_rel = torch.abs(pred_depth[valid] - gt_depth[valid]) / denom
+    return abs_rel.mean()
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main training loop
 # ──────────────────────────────────────────────────────────────────────────────
@@ -195,6 +298,25 @@ def save_checkpoint(state: dict, path: str):
 def main():
     args = get_args()
     config = build_config(args)
+    
+    # Apply Phase 5 ablation configurations
+    if args.phase5_ablation:
+        print(f"\n🔄 Applying Phase 5 ablation: {args.phase5_ablation}")
+        if args.phase5_ablation == 'rgb_only':
+            # RGB only: no LiDAR
+            config["data"]["use_lidar"] = False
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = False
+        elif args.phase5_ablation == 'supervision_only':
+            # RGB + LiDAR supervision (no fusion)
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = False
+        elif args.phase5_ablation == 'late_fusion':
+            # RGB + LiDAR with late fusion
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
+            config["model"]["pixel_decoder"]["lidar_fusion_type"] = "late"
+        elif args.phase5_ablation == 'token_fusion':
+            # RGB + LiDAR with token fusion
+            config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
+            config["model"]["pixel_decoder"]["lidar_fusion_type"] = "token"
 
     print("Arguments:")
     for arg in vars(args):
@@ -205,11 +327,16 @@ def main():
         torch.cuda.manual_seed_all(args.seed)
 
     # Set Device
-    device = torch.device(f"cuda:{args.cuda}" if torch.cuda.is_available() else "cpu")
+    device = torch.device(
+        f"cuda:{args.cuda}" if (args.cuda is not None and args.cuda >= 0 and torch.cuda.is_available()) else "cpu"
+    )
     print(f"Using device: {device}")
 
     # Experiment output directory under ./runs/
-    log_dir = f"runs/train_depth_{int(time())}"
+    if args.run_name:
+        log_dir = args.run_name if args.run_name.startswith("runs/") else f"runs/{args.run_name}"
+    else:
+        log_dir = f"runs/train_depth_{int(time() * 1000)}_{os.getpid()}"
     os.makedirs(log_dir, exist_ok = True)
     print(f"\n\033[1mLogging to {log_dir}\033[0m")
     tensorboard_dir = f"{log_dir}/tensorboard"
@@ -234,11 +361,18 @@ def main():
 
     train_dataset = ImageDataset(
         root = data_cfg["train_root"],
-        split = "train",
+        split = data_cfg.get("train_split", "train"),
         image_shape = data_cfg["image_shape"],
-        depth_scale = data_cfg.get("depth_scale", 0.001),
+        depth_scale = data_cfg.get("depth_scale", 1.0),
+        use_lidar = data_cfg.get("use_lidar", False),
+        lidar_root = data_cfg.get("lidar_root", None),
+        lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+        lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+        lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
     )
+    if data_cfg.get("max_train_samples", 0) and data_cfg["max_train_samples"] > 0:
+        train_dataset = Subset(train_dataset, range(min(data_cfg["max_train_samples"], len(train_dataset))))
     train_loader = DataLoader(
         train_dataset,
         batch_size = train_cfg["batch_size"],
@@ -250,16 +384,39 @@ def main():
     )
 
     # Optional validation loader
-    # NOTE: We only have 2 splits, originally was train/test
-    #       we call it val for now.
+    # NOTE: New protocol: use val_split if available, else fall back to test_split (for backward compat)
     val_loader = None
     if data_cfg.get("val_root") is not None:
-        val_dataset = ImageDataset(
-            root = data_cfg["val_root"],
-            split = "test",
-            image_shape = data_cfg["image_shape"],
-            depth_scale = data_cfg.get("depth_scale", 0.001),
-        )
+        val_split_name = data_cfg.get("val_split", "val")
+        try:
+            val_dataset = ImageDataset(
+                root = data_cfg["val_root"],
+                split = val_split_name,
+                image_shape = data_cfg["image_shape"],
+                depth_scale = data_cfg.get("depth_scale", 1.0),
+                use_lidar = data_cfg.get("use_lidar", False),
+                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+                lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+                lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
+            )
+        except ValueError:
+            # Fallback: if val_split does not exist, try test_split (legacy compat)
+            test_split_name = data_cfg.get("test_split", "test")
+            val_dataset = ImageDataset(
+                root = data_cfg["val_root"],
+                split = test_split_name,
+                image_shape = data_cfg["image_shape"],
+                depth_scale = data_cfg.get("depth_scale", 1.0),
+                use_lidar = data_cfg.get("use_lidar", False),
+                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
+                lidar_h5_key = data_cfg.get("lidar_h5_key", None),
+                lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
+            )
+            print(f"\033[93m[WARN] val_split '{val_split_name}' not available; fell back to test_split '{test_split_name}'\033[0m")
+        if data_cfg.get("max_val_samples", 0) and data_cfg["max_val_samples"] > 0:
+            val_dataset = Subset(val_dataset, range(min(data_cfg["max_val_samples"], len(val_dataset))))
         val_loader = DataLoader(
             val_dataset,
             batch_size = train_cfg["batch_size"],
@@ -271,6 +428,8 @@ def main():
 
     # verbose
     print(f"\033[1mTrain samples:\033[0m {len(train_dataset)}")
+    print(f"\033[1mLiDAR enabled:\033[0m {data_cfg.get('use_lidar', False)}")
+    print(f"\033[1mLiDAR fusion enabled:\033[0m {config['model']['pixel_decoder'].get('use_lidar_fusion', False)}")
     if val_loader:
         print(f"\033[1mVal samples:\033[0m   {len(val_dataset)}")
 
@@ -325,6 +484,12 @@ def main():
         model.train()
         epoch_loss = 0.0
         num_batches = 0
+        lidar_epoch_valid_ratio_sum = 0.0
+        lidar_epoch_steps = 0
+        lidar_dropout_ratio_sum = 0.0
+        lidar_gate_mean_sum = 0.0
+        lidar_fusion_steps = 0
+        current_lr = optimizer.param_groups[0]["lr"]
 
         for batch_idx, batch in tqdm(enumerate(train_loader), 
                                      total = len(train_loader),
@@ -341,6 +506,27 @@ def main():
             depth_mask = batch['data']["depth_mask"].to(device)  # [2B, 1, H, W]
             K = batch['data']["K"].to(device)                    # [2B, 3, 3]
 
+            lidar_depth = batch['data'].get("lidar_depth", None)
+            lidar_mask = batch['data'].get("lidar_mask", None)
+            lidar_confidence = batch['data'].get("lidar_confidence", None)
+            if lidar_depth is not None:
+                lidar_depth = lidar_depth.to(device)
+            if lidar_mask is not None:
+                lidar_mask = lidar_mask.to(device)
+            if lidar_confidence is not None:
+                lidar_confidence = lidar_confidence.to(device)
+
+            # Phase 3: LiDAR dropout (sample-level), improves RGB-only robustness.
+            lidar_dropout_prob = float(data_cfg.get("lidar_dropout_prob", 0.0))
+            if lidar_depth is not None and lidar_mask is not None and lidar_dropout_prob > 0.0:
+                keep = (torch.rand((image.shape[0], 1, 1, 1), device=device) >= lidar_dropout_prob)
+                keep_f = keep.float()
+                lidar_depth = lidar_depth * keep_f
+                lidar_mask = lidar_mask & keep
+                if lidar_confidence is not None:
+                    lidar_confidence = lidar_confidence * keep_f
+                lidar_dropout_ratio_sum += float((~keep).float().mean().item())
+
             # Build Pinhole camera with per-sample intrinsics (cx already updated
             # for flipped samples by the dataset's _make_sample method).
             camera = build_camera_from_batch(K)
@@ -352,6 +538,11 @@ def main():
                 "depth_mask": depth_mask,
                 "camera": camera,
             }
+            if lidar_depth is not None and lidar_mask is not None:
+                inputs["lidar_depth"] = lidar_depth
+                inputs["lidar_mask"] = lidar_mask
+                if lidar_confidence is not None:
+                    inputs["lidar_confidence"] = lidar_confidence
 
             # image_metas carry the flip / si flags set per-sample by the dataset
             image_metas = batch['img_metas']
@@ -361,6 +552,19 @@ def main():
             outputs, losses = model.forward(inputs, image_metas)
 
             # Compute total loss
+            lidar_raw_loss = None
+            lidar_stats = None
+            lidar_weight = train_cfg.get("lidar_loss_weight", 0.0)
+            if lidar_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs:
+                lidar_raw_loss, lidar_stats = compute_lidar_sparse_loss(
+                    pred_depth = outputs["depth"],
+                    lidar_depth = lidar_depth,
+                    lidar_mask = lidar_mask,
+                    lidar_confidence = lidar_confidence,
+                )
+                if lidar_raw_loss is not None:
+                    losses["opt"]["LiDARSparse"] = lidar_weight * lidar_raw_loss
+
             total_loss = sum(losses["opt"].values())
             if not torch.isfinite(total_loss):
                 print(f"  [WARNING] Non-finite loss at step {global_step}, skipping.")
@@ -384,6 +588,21 @@ def main():
                 for loss_name, loss_val in losses["opt"].items():
                     writer.add_scalar(f"train/loss_{loss_name}", loss_val.item(), global_step)
                 writer.add_scalar("train/lr", current_lr, global_step)
+                if lidar_raw_loss is not None and lidar_stats is not None:
+                    writer.add_scalar("train/lidar_loss_raw", lidar_raw_loss.item(), global_step)
+                    writer.add_scalar("train/lidar_valid_ratio", lidar_stats["valid_ratio"], global_step)
+                    writer.add_scalar("train/lidar_valid_pixels", lidar_stats["valid_pixels"], global_step)
+                    lidar_epoch_valid_ratio_sum += lidar_stats["valid_ratio"]
+                    lidar_epoch_steps += 1
+
+                fusion_stats = outputs.get("fusion_stats", None)
+                if fusion_stats is not None:
+                    writer.add_scalar("train/fusion_lidar_used", float(fusion_stats["lidar_used"].item()), global_step)
+                    writer.add_scalar("train/fusion_lidar_valid_ratio", float(fusion_stats["lidar_valid_ratio"].item()), global_step)
+                    writer.add_scalar("train/fusion_lidar_gate_mean", float(fusion_stats["lidar_gate_mean"].item()), global_step)
+                    if float(fusion_stats["lidar_used"].item()) > 0.0:
+                        lidar_gate_mean_sum += float(fusion_stats["lidar_gate_mean"].item())
+                        lidar_fusion_steps += 1
 
                 # Log sample predicted and GT depth images
                 if "depth" in outputs:
@@ -393,6 +612,24 @@ def main():
         # ── End-of-epoch ─────────────────────────────────────────────────
         avg_loss = epoch_loss / max(num_batches, 1)
         writer.add_scalar("epoch/train_loss", avg_loss, epoch + 1)
+        if lidar_epoch_steps > 0:
+            writer.add_scalar(
+                "epoch/train_lidar_valid_ratio",
+                lidar_epoch_valid_ratio_sum / lidar_epoch_steps,
+                epoch + 1,
+            )
+        if num_batches > 0:
+            writer.add_scalar(
+                "epoch/train_lidar_dropout_ratio",
+                lidar_dropout_ratio_sum / num_batches,
+                epoch + 1,
+            )
+        if lidar_fusion_steps > 0:
+            writer.add_scalar(
+                "epoch/train_fusion_lidar_gate_mean",
+                lidar_gate_mean_sum / lidar_fusion_steps,
+                epoch + 1,
+            )
         print(f"\033[1mEpoch [{epoch+1}/{num_epochs}] avg loss: {avg_loss:.4f} - LR: {current_lr:.6f}\033[0m")
 
         # Step the LR scheduler
@@ -404,11 +641,30 @@ def main():
             val_loss = 0.0
             val_batches = 0
             with torch.no_grad():
+                val_lidar_valid_ratio_sum = 0.0
+                val_lidar_steps = 0
+                val_fusion_gate_mean_sum = 0.0
+                val_fusion_steps = 0
+                val_rmse_sum = 0.0
+                val_abs_rel_sum = 0.0
+                val_metric_steps = 0
+                val_rmse_with_lidar_sum = 0.0
+                val_rmse_rgb_only_sum = 0.0
+                val_rmse_compare_steps = 0
                 for batch in val_loader:
                     image = batch["data"]["image"].to(device)
                     depth = batch["data"]["depth"].to(device)
                     depth_mask = batch["data"]["depth_mask"].to(device)
                     K = batch["data"]["K"].to(device)
+                    lidar_depth = batch["data"].get("lidar_depth", None)
+                    lidar_mask = batch["data"].get("lidar_mask", None)
+                    lidar_confidence = batch["data"].get("lidar_confidence", None)
+                    if lidar_depth is not None:
+                        lidar_depth = lidar_depth.to(device)
+                    if lidar_mask is not None:
+                        lidar_mask = lidar_mask.to(device)
+                    if lidar_confidence is not None:
+                        lidar_confidence = lidar_confidence.to(device)
                     camera = build_camera_from_batch(K)
                     inputs = {
                         "image": image,
@@ -416,17 +672,114 @@ def main():
                         "depth_mask": depth_mask,
                         "camera": camera,
                     }
+                    if lidar_depth is not None and lidar_mask is not None:
+                        inputs["lidar_depth"] = lidar_depth
+                        inputs["lidar_mask"] = lidar_mask
+                        if lidar_confidence is not None:
+                            inputs["lidar_confidence"] = lidar_confidence
                     image_metas = batch["img_metas"]
                     # model is in eval() mode: forward() dispatches to forward_test
                     # which does NOT compute losses. We use forward_train explicitly
                     # so we can still get loss values for monitoring.
-                    _ , losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
+                    outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
+                    lidar_val_weight = train_cfg.get("lidar_loss_weight", 0.0)
+                    if lidar_val_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
+                        lidar_val_raw, lidar_val_stats = compute_lidar_sparse_loss(
+                            pred_depth = outputs_val["depth"],
+                            lidar_depth = lidar_depth,
+                            lidar_mask = lidar_mask,
+                            lidar_confidence = lidar_confidence,
+                        )
+                        if lidar_val_raw is not None:
+                            losses_val["opt"]["LiDARSparse"] = lidar_val_weight * lidar_val_raw
+                            val_lidar_valid_ratio_sum += lidar_val_stats["valid_ratio"]
+                            val_lidar_steps += 1
+
+                    fusion_stats_val = outputs_val.get("fusion_stats", None)
+                    if fusion_stats_val is not None and float(fusion_stats_val["lidar_used"].item()) > 0.0:
+                        val_fusion_gate_mean_sum += float(fusion_stats_val["lidar_gate_mean"].item())
+                        val_fusion_steps += 1
+
+                    if "depth" in outputs_val:
+                        rmse_val = compute_depth_rmse(outputs_val["depth"], depth, depth_mask)
+                        abs_rel_val = compute_depth_abs_rel(outputs_val["depth"], depth, depth_mask)
+                        val_rmse_sum += float(rmse_val.item())
+                        val_abs_rel_sum += float(abs_rel_val.item())
+                        val_metric_steps += 1
+
+                    # Phase 4: fallback check (RGB-only) during validation.
+                    if (
+                        data_cfg.get("phase4_eval_fallback", True)
+                        and config["model"]["pixel_decoder"].get("use_lidar_fusion", False)
+                        and lidar_depth is not None
+                        and lidar_mask is not None
+                    ):
+                        inputs_rgb_only = {
+                            "image": image,
+                            "depth": depth,
+                            "depth_mask": depth_mask,
+                            "camera": camera,
+                        }
+                        outputs_rgb_only, _ = model.forward_train(
+                            inputs_rgb_only,
+                            image_metas,
+                            force_compute_losses = False,
+                        )
+                        rmse_with_lidar = compute_depth_rmse(outputs_val["depth"], depth, depth_mask)
+                        rmse_rgb_only = compute_depth_rmse(outputs_rgb_only["depth"], depth, depth_mask)
+                        val_rmse_with_lidar_sum += float(rmse_with_lidar.item())
+                        val_rmse_rgb_only_sum += float(rmse_rgb_only.item())
+                        val_rmse_compare_steps += 1
                     val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
 
             avg_val_loss = val_loss / max(val_batches, 1)
             writer.add_scalar("epoch/val_loss", avg_val_loss, epoch + 1)
-            print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
+            if val_metric_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_rmse",
+                    val_rmse_sum / val_metric_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_abs_rel",
+                    val_abs_rel_sum / val_metric_steps,
+                    epoch + 1,
+                )
+            if val_lidar_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_lidar_valid_ratio",
+                    val_lidar_valid_ratio_sum / val_lidar_steps,
+                    epoch + 1,
+                )
+            if val_fusion_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_fusion_lidar_gate_mean",
+                    val_fusion_gate_mean_sum / val_fusion_steps,
+                    epoch + 1,
+                )
+            if val_rmse_compare_steps > 0:
+                writer.add_scalar(
+                    "epoch/val_rmse_with_lidar",
+                    val_rmse_with_lidar_sum / val_rmse_compare_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_rmse_rgb_only_fallback",
+                    val_rmse_rgb_only_sum / val_rmse_compare_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_rmse_gap_rgb_only_minus_lidar",
+                    (val_rmse_rgb_only_sum - val_rmse_with_lidar_sum) / val_rmse_compare_steps,
+                    epoch + 1,
+                )
+            if val_metric_steps > 0:
+                avg_val_rmse = val_rmse_sum / val_metric_steps
+                avg_val_abs_rel = val_abs_rel_sum / val_metric_steps
+                print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f}\033[0m")
+            else:
+                print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 
         # ── Save checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % save_every == 0:

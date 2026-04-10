@@ -87,6 +87,12 @@ def get_args() -> argparse.Namespace:
                         help="Number of attention heads.")
     parser.add_argument("--expansion", type=int, default=4,
                         help="MLP expansion factor.")
+    parser.add_argument(
+        "--use_lidar_fusion",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="Enable LiDAR-fusion decoder architecture when loading Phase-3 checkpoints.",
+    )
 
     # --- Data ---
     parser.add_argument(
@@ -139,6 +145,7 @@ def build_config(args: argparse.Namespace) -> dict:
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
                 "depths": args.depths,
+                "use_lidar_fusion": args.use_lidar_fusion,
             },
             "num_heads": args.num_heads,
             "expansion": args.expansion,

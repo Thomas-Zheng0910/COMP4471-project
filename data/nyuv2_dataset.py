@@ -11,6 +11,7 @@ NYUV2_MAT_PATH = "datasets/nyu_depth_v2_labeled.mat"
 
 # import necessary libraries
 import os
+from pathlib import Path
 from typing import Callable, Optional, Tuple, List, Dict
 
 import h5py
@@ -37,6 +38,7 @@ MAX_DEPTH: float = 10.0
 
 # Raw depth values in the .mat file are in metres (float32 already scaled)
 DEPTH_SCALE: float = 1.0
+LIDAR_DEPTH_SCALE: float = 1.0
 
 # Image net normalisation stats (from torchvision.transforms)
 # NOTE: These are used in inferencing (revert normalised images)
@@ -174,7 +176,15 @@ class NYUv2Dataset(Dataset):
         root: str = NYUV2_MAT_PATH,
         image_shape: Tuple[int, int] = (480, 640),
         depth_scale: float = DEPTH_SCALE,
+        use_lidar: bool = False,
+        lidar_root: Optional[str] = None,
+        lidar_depth_scale: float = LIDAR_DEPTH_SCALE,
+        lidar_h5_key: Optional[str] = None,
+        lidar_confidence_h5_key: Optional[str] = None,
         split: str = "train",
+        split_indices_file: Optional[str] = None,
+        val_ratio: float = 0.1,
+        val_seed: int = 42,
         flip_aug: bool = False,
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
@@ -182,8 +192,8 @@ class NYUv2Dataset(Dataset):
     ) -> None:
         super().__init__()
 
-        assert split in ("train", "test", "all"), (
-            f"split must be one of 'train', 'test', 'all', got '{split}'."
+        assert split in ("train", "val", "test", "all"), (
+            f"split must be one of 'train', 'val', 'test', 'all', got '{split}'."
         )
 
         self.mat_path = root
@@ -192,6 +202,14 @@ class NYUv2Dataset(Dataset):
         self.return_intrinsics = return_intrinsics
         self.image_shape = tuple(image_shape)
         self.depth_scale = depth_scale
+        self.use_lidar = use_lidar
+        self.lidar_root = Path(lidar_root) if lidar_root is not None else None
+        self.lidar_depth_scale = lidar_depth_scale
+        self.lidar_h5_key = lidar_h5_key
+        self.lidar_confidence_h5_key = lidar_confidence_h5_key
+        self.split_indices_file = split_indices_file
+        self.val_ratio = float(val_ratio)
+        self.val_seed = int(val_seed)
 
         self.image_transform = (
             image_transform if image_transform is not None else _default_image_transform(self.image_shape if self.image_shape != (480, 640) else None)
@@ -203,20 +221,206 @@ class NYUv2Dataset(Dataset):
         # Read total count once, then close (fork-safety for DataLoader)
         h5 = _load_mat(self.mat_path)
         total = h5["images"].shape[0]  # (N, 3, W, H)
+
+        if self.use_lidar:
+            if self.lidar_h5_key is None:
+                if "lidar_depths" in h5:
+                    self.lidar_h5_key = "lidar_depths"
+                elif "lidar" in h5:
+                    self.lidar_h5_key = "lidar"
+
+            if self.lidar_confidence_h5_key is None:
+                if "lidar_confidence" in h5:
+                    self.lidar_confidence_h5_key = "lidar_confidence"
+                elif "lidar_confidences" in h5:
+                    self.lidar_confidence_h5_key = "lidar_confidences"
+
+            if self.lidar_h5_key is None and self.lidar_root is None:
+                h5.close()
+                raise ValueError(
+                    "use_lidar=True but no LiDAR source found. "
+                    "Provide lidar_root or a valid lidar_h5_key in the .mat file."
+                )
+
+            if self.lidar_h5_key is not None and self.lidar_h5_key not in h5:
+                h5.close()
+                raise KeyError(
+                    f"LiDAR HDF5 key '{self.lidar_h5_key}' not found in {self.mat_path}."
+                )
+
+            if self.lidar_confidence_h5_key is not None and self.lidar_confidence_h5_key not in h5:
+                h5.close()
+                raise KeyError(
+                    f"LiDAR confidence HDF5 key '{self.lidar_confidence_h5_key}' not found in {self.mat_path}."
+                )
         h5.close()
 
-        test_set = set(self._EIGEN_TEST_INDICES)
-        all_indices = list(range(total))
-
-        if split == "train":
-            self.indices = [i for i in all_indices if i not in test_set]
-        elif split == "test":
-            self.indices = [i for i in all_indices if i in test_set]
+        if split_indices_file is not None:
+            self.indices = self._load_indices_from_file(split_indices_file, total)
         else:
-            self.indices = all_indices
+            split_map = self.build_standard_train_val_test_splits(
+                total=total,
+                val_ratio=self.val_ratio,
+                seed=self.val_seed,
+            )
+            if split == "all":
+                self.indices = list(range(total))
+            elif split in split_map:
+                self.indices = split_map[split]
+            else:
+                raise ValueError(f"Unsupported split '{split}'.")
 
         # Lazy per-worker file handle
         self._h5: Optional[h5py.File] = None
+
+    def _load_lidar_from_file(self, mat_idx: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Load LiDAR depth and optional confidence from external files.
+
+        Supported file patterns under ``lidar_root``:
+            - ``{idx:05d}.npy`` / ``{idx:04d}.npy`` / ``{idx}.npy``
+            - ``{idx:05d}.npz`` / ``{idx:04d}.npz`` / ``{idx}.npz``
+
+        For NPZ files, expected keys are one of:
+            - depth: ``lidar_depth`` | ``depth`` | ``sparse_depth``
+            - confidence: ``lidar_confidence`` | ``confidence``
+        """
+        if self.lidar_root is None:
+            raise RuntimeError("LiDAR root is not configured.")
+
+        candidates = [
+            self.lidar_root / f"{mat_idx:05d}.npy",
+            self.lidar_root / f"{mat_idx:04d}.npy",
+            self.lidar_root / f"{mat_idx}.npy",
+            self.lidar_root / f"{mat_idx:05d}.npz",
+            self.lidar_root / f"{mat_idx:04d}.npz",
+            self.lidar_root / f"{mat_idx}.npz",
+        ]
+        src = next((path for path in candidates if path.is_file()), None)
+        if src is None:
+            raise FileNotFoundError(
+                f"No LiDAR file found for index {mat_idx} under '{self.lidar_root}'."
+            )
+
+        if src.suffix == ".npy":
+            lidar_depth = np.load(src).astype(np.float32)
+            lidar_conf = None
+        else:
+            obj = np.load(src)
+            if "lidar_depth" in obj:
+                lidar_depth = obj["lidar_depth"].astype(np.float32)
+            elif "depth" in obj:
+                lidar_depth = obj["depth"].astype(np.float32)
+            elif "sparse_depth" in obj:
+                lidar_depth = obj["sparse_depth"].astype(np.float32)
+            else:
+                raise KeyError(
+                    f"NPZ file '{src}' does not contain one of ['lidar_depth', 'depth', 'sparse_depth']."
+                )
+
+            if "lidar_confidence" in obj:
+                lidar_conf = obj["lidar_confidence"].astype(np.float32)
+            elif "confidence" in obj:
+                lidar_conf = obj["confidence"].astype(np.float32)
+            else:
+                lidar_conf = None
+
+        return lidar_depth, lidar_conf
+
+    @classmethod
+    def build_standard_train_val_test_splits(
+        cls,
+        total: int,
+        val_ratio: float = 0.1,
+        seed: int = 42,
+    ) -> Dict[str, List[int]]:
+        """
+        Build deterministic train/val/test indices.
+
+        - test: official Eigen split (654 images)
+        - train/val: partition of non-test subset with fixed RNG seed
+        """
+
+        if total <= 0:
+            return {"train": [], "val": [], "test": []}
+
+        ratio = float(np.clip(val_ratio, 0.0, 0.5))
+        test_set = {i for i in cls._EIGEN_TEST_INDICES if 0 <= i < total}
+        all_indices = list(range(total))
+        train_pool = [i for i in all_indices if i not in test_set]
+        test_indices = sorted(i for i in all_indices if i in test_set)
+
+        if len(train_pool) <= 1 or ratio <= 0.0:
+            return {
+                "train": sorted(train_pool),
+                "val": [],
+                "test": test_indices,
+            }
+
+        rng = np.random.default_rng(seed)
+        shuffled = np.array(train_pool, dtype=np.int64)
+        rng.shuffle(shuffled)
+        n_val = int(round(len(shuffled) * ratio))
+        n_val = max(1, min(len(shuffled) - 1, n_val))
+
+        val_indices = sorted(shuffled[:n_val].tolist())
+        train_indices = sorted(shuffled[n_val:].tolist())
+        return {
+            "train": train_indices,
+            "val": val_indices,
+            "test": test_indices,
+        }
+
+    @staticmethod
+    def _load_indices_from_file(split_file: str, total: int) -> List[int]:
+        path = Path(split_file)
+        if not path.is_file():
+            raise FileNotFoundError(f"Split file not found: {split_file}")
+
+        indices: List[int] = []
+        for raw_line in path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            idx = int(line)
+            if idx < 0 or idx >= total:
+                raise ValueError(
+                    f"Split index {idx} in '{split_file}' is out of range [0, {total - 1}]"
+                )
+            indices.append(idx)
+
+        deduped = sorted(set(indices))
+        if len(deduped) != len(indices):
+            raise ValueError(f"Split file '{split_file}' contains duplicate indices.")
+        return deduped
+
+    def _load_lidar(self, h5: h5py.File, mat_idx: int) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Load LiDAR depth and optional confidence from HDF5 or external files.
+        """
+        if self.lidar_h5_key is not None:
+            lidar_raw = h5[self.lidar_h5_key][mat_idx]
+            if lidar_raw.ndim != 2:
+                raise ValueError(
+                    f"LiDAR depth at key '{self.lidar_h5_key}' must be 2D, got shape {lidar_raw.shape}."
+                )
+
+            # Align with NYUv2 HDF5 layout (W, H) -> (H, W) when needed.
+            if lidar_raw.shape == (640, 480):
+                lidar_depth = np.transpose(lidar_raw, (1, 0)).astype(np.float32)
+            else:
+                lidar_depth = lidar_raw.astype(np.float32)
+
+            lidar_conf = None
+            if self.lidar_confidence_h5_key is not None:
+                lidar_conf_raw = h5[self.lidar_confidence_h5_key][mat_idx]
+                if lidar_conf_raw.shape == (640, 480):
+                    lidar_conf = np.transpose(lidar_conf_raw, (1, 0)).astype(np.float32)
+                else:
+                    lidar_conf = lidar_conf_raw.astype(np.float32)
+            return lidar_depth, lidar_conf
+
+        return self._load_lidar_from_file(mat_idx)
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -249,6 +453,9 @@ class NYUv2Dataset(Dataset):
         image_tensor: torch.Tensor,
         depth_tensor: torch.Tensor,
         depth_mask: torch.Tensor,
+        lidar_depth_tensor: Optional[torch.Tensor],
+        lidar_mask_tensor: Optional[torch.Tensor],
+        lidar_confidence_tensor: Optional[torch.Tensor],
         flip: bool,
     ) -> Dict:
         
@@ -260,6 +467,12 @@ class NYUv2Dataset(Dataset):
             image_tensor = torch.flip(image_tensor, dims = [-1])
             depth_tensor = torch.flip(depth_tensor, dims = [-1])
             depth_mask   = torch.flip(depth_mask,   dims = [-1])
+            if lidar_depth_tensor is not None:
+                lidar_depth_tensor = torch.flip(lidar_depth_tensor, dims = [-1])
+            if lidar_mask_tensor is not None:
+                lidar_mask_tensor = torch.flip(lidar_mask_tensor, dims = [-1])
+            if lidar_confidence_tensor is not None:
+                lidar_confidence_tensor = torch.flip(lidar_confidence_tensor, dims = [-1])
 
         sample: Dict = {
             "image":      image_tensor,  # [3, H, W] float32
@@ -267,7 +480,14 @@ class NYUv2Dataset(Dataset):
             "depth_mask": depth_mask,    # [1, H, W] bool
             "flip":       flip,          # bool – consumed by collate_fn → img_metas
             "si":         False,         # scale-invariant flag (always False for NYUv2)
+            "has_lidar":  lidar_depth_tensor is not None,
         }
+
+        if lidar_depth_tensor is not None and lidar_mask_tensor is not None:
+            sample["lidar_depth"] = lidar_depth_tensor
+            sample["lidar_mask"] = lidar_mask_tensor
+            if lidar_confidence_tensor is not None:
+                sample["lidar_confidence"] = lidar_confidence_tensor
 
         if self.return_intrinsics:
             K = NYUV2_INTRINSICS.clone()  # [3, 3] float32
@@ -312,21 +532,85 @@ class NYUv2Dataset(Dataset):
         depth_tensor: torch.Tensor = self.depth_transform(depth_np)
         depth_tensor = torch.clamp(depth_tensor, MIN_DEPTH, MAX_DEPTH)
 
+        # Optional LiDAR sparse depth
+        lidar_depth_tensor: Optional[torch.Tensor] = None
+        lidar_mask_tensor: Optional[torch.Tensor] = None
+        lidar_confidence_tensor: Optional[torch.Tensor] = None
+        if self.use_lidar:
+            lidar_depth_np, lidar_conf_np = self._load_lidar(h5, mat_idx)
+            lidar_depth_np = (
+                lidar_depth_np * self.lidar_depth_scale
+                if self.lidar_depth_scale != 1.0
+                else lidar_depth_np
+            )
+
+            lidar_depth_tensor_raw = self.depth_transform(lidar_depth_np)
+            lidar_mask_tensor = (
+                torch.isfinite(lidar_depth_tensor_raw)
+                & (lidar_depth_tensor_raw > MIN_DEPTH)
+            )
+            lidar_depth_tensor = torch.clamp(lidar_depth_tensor_raw, MIN_DEPTH, MAX_DEPTH)
+            lidar_depth_tensor = torch.where(
+                lidar_mask_tensor,
+                lidar_depth_tensor,
+                torch.zeros_like(lidar_depth_tensor),
+            )
+
+            if lidar_conf_np is not None:
+                lidar_confidence_tensor = self.depth_transform(lidar_conf_np)
+                lidar_confidence_tensor = torch.clamp(lidar_confidence_tensor, min = 0.0)
+                lidar_confidence_tensor = torch.where(
+                    lidar_mask_tensor,
+                    lidar_confidence_tensor,
+                    torch.zeros_like(lidar_confidence_tensor),
+                )
+            else:
+                lidar_confidence_tensor = lidar_mask_tensor.float()
+
         if self.split == "test":
             depth_tensor = self._apply_eval_mask(depth_tensor)
 
-        # Depth mask (all pixels are valid for NYUv2 dense GT)
-        depth_mask = torch.ones_like(depth_tensor, dtype = torch.bool)
+        # Depth mask (valid pixels only). For test split this naturally excludes
+        # regions outside eval crop because they are zeroed by _apply_eval_mask.
+        depth_mask = (
+            torch.isfinite(depth_tensor)
+            & (depth_tensor > MIN_DEPTH)
+            & (depth_tensor <= MAX_DEPTH)
+        )
 
         if self.flip_aug:
             # Return (original, horizontally-flipped) pair so the collate_fn
             # can interleave them into [orig0, flip0, orig1, flip1, ...] batches
             # required by the SelfDistill invariance loss.
-            original = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
-            flipped  = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = True)
+            original = self._make_sample(
+                image_tensor,
+                depth_tensor,
+                depth_mask,
+                lidar_depth_tensor,
+                lidar_mask_tensor,
+                lidar_confidence_tensor,
+                flip = False,
+            )
+            flipped  = self._make_sample(
+                image_tensor,
+                depth_tensor,
+                depth_mask,
+                lidar_depth_tensor,
+                lidar_mask_tensor,
+                lidar_confidence_tensor,
+                flip = True,
+            )
             return original, flipped
         else:
-            return self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
+            return self._make_sample(
+                image_tensor,
+                depth_tensor,
+                depth_mask,
+                lidar_depth_tensor,
+                lidar_mask_tensor,
+                lidar_confidence_tensor,
+                flip = False,
+            )
 
     def __repr__(self) -> str:
         return (
