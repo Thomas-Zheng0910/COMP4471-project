@@ -8,7 +8,7 @@ from typing import Literal, Optional, Tuple, Union
 
 import numpy as np
 import torch
-from torch import Tensor, nn
+from torch import Tensor, nn, device, dtype
 
 
 # RoPE positional embedding with no mixing of coordinates (axial) and no learnable weights
