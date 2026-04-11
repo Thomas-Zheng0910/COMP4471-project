@@ -10,7 +10,7 @@ export HF_HUB_CACHE="./cache"
 
 # Experiment Configuration
 SEED=648
-CUDA=3
+CUDA=...
 EPOCHS=50
 BATCH_SIZE=2
 LR=1e-4
@@ -46,6 +46,11 @@ VAL_ROOT="datasets/nyu_depth_v2_labeled.mat"
 IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
 NUM_WORKERS=4
+
+# Weather augmentation
+ENABLE_WEATHER_AUG="true"
+WEATHER_AUG_PROB=0.5
+USE_DEPTH_FOG="false"
 
 # Checkpoint Resume (leave empty for fresh start)
 RESUME=""
@@ -92,6 +97,12 @@ fi
 
 if [ -n "$OUTPUT_IDX" ]; then
     CMD="$CMD --output_idx $OUTPUT_IDX"
+fi
+
+if [ "$ENABLE_WEATHER_AUG" = "true" ]; then
+    CMD="$CMD --enable_weather_aug $ENABLE_WEATHER_AUG"
+    CMD="$CMD --weather_prob $WEATHER_AUG_PROB"
+    CMD="$CMD --use_depth_fog $USE_DEPTH_FOG"
 fi
 
 # Execute Command

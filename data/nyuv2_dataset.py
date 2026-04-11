@@ -20,6 +20,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
+import random
+
+from utils.weather import get_albumentations_weather, depth_based_fog
 
 # ---------------------------------------------------------------------------
 # Camera intrinsics (from the NYU Depth V2 toolbox / UniDepth reference)
@@ -189,7 +192,11 @@ class NYUv2Dataset(Dataset):
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
         return_intrinsics: bool = True,
-    ) -> None:
+        # Weather augmentation options (new)
+        weather_aug: Optional[Callable] = None,
+        weather_prob: float = 0.0,
+        use_depth_fog: bool = False,
+     ) -> None:
         super().__init__()
 
         assert split in ("train", "val", "test", "all"), (
@@ -217,6 +224,14 @@ class NYUv2Dataset(Dataset):
         self.depth_transform = (
             depth_transform if depth_transform is not None else _default_depth_transform(self.image_shape if self.image_shape != (480, 640) else None)
         )
+
+        # Weather augmentation configuration
+        # weather_aug: callable(image_np) -> image_np (expects HxWx3 uint8)
+        # weather_prob: probability to apply augmentation to a sample
+        # use_depth_fog: if True, generate depth-based fog using the GT depth
+        self.weather_aug = weather_aug
+        self.weather_prob = float(weather_prob)
+        self.use_depth_fog = bool(use_depth_fog)
 
         # Read total count once, then close (fork-safety for DataLoader)
         h5 = _load_mat(self.mat_path)
@@ -517,7 +532,6 @@ class NYUv2Dataset(Dataset):
         # HDF5 layout: (N, 3, W, H) uint8  ->  transpose to (H, W, 3)
         image_raw = h5["images"][mat_idx]                  # (3, W, H)
         image_np = np.transpose(image_raw, (2, 1, 0))      # (H, W, 3)
-        image_pil = Image.fromarray(image_np.astype(np.uint8), mode = "RGB")
 
         # Depth map
         # HDF5 layout: (N, W, H) float32, metres  ->  transpose to (H, W)
@@ -526,6 +540,22 @@ class NYUv2Dataset(Dataset):
         # Scaling
         depth_np = depth_np * self.depth_scale if self.depth_scale != 1.0 else depth_np
 
+        # Apply weather augmentation (on-the-fly). Use depth-based fog if requested,
+        # otherwise use provided image-space augmentation callable. This operates
+        # on the numpy RGB image (HxWx3 uint8). The depth map is not modified.
+        try:
+            if (self.weather_aug is not None or self.use_depth_fog) and random.random() < float(self.weather_prob):
+                if self.use_depth_fog:
+                    image_np = depth_based_fog(image_np, depth_np)
+                elif self.weather_aug is not None:
+                    image_np = self.weather_aug(image_np)
+        except Exception:
+            # Fail-safe: if augmentation errors, fall back to original image_np
+            pass
+
+        # Convert (possibly augmented) numpy image back to PIL for existing transforms
+        image_pil = Image.fromarray(image_np.astype(np.uint8), mode = "RGB")
+ 
         # Transforms
         image_tensor: torch.Tensor = self.image_transform(image_pil)
 
@@ -616,6 +646,7 @@ class NYUv2Dataset(Dataset):
         return (
             f"NYUv2Dataset(split='{self.split}', "
             f"flip_aug={self.flip_aug}, "
+            f"weather_aug={self.weather_aug is not None}, "
             f"n_samples={len(self)}, "
             f"mat_path='{self.mat_path}')"
         )

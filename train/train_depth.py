@@ -27,6 +27,7 @@ from data.nyuv2_dataset import NYUv2Dataset as ImageDataset
 from model.unidepthv1.unidepthv1 import UniDepthV1
 from utils.camera import Pinhole
 from utils.visualization import colorize
+from utils.weather import get_albumentations_weather
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -94,6 +95,11 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--max_train_samples', type=int, default=0, help='Use first N training samples (0=all)')
     parser.add_argument('--max_val_samples', type=int, default=0, help='Use first N validation samples (0=all)')
 
+    # Weather augmentation
+    parser.add_argument('--enable_weather_aug', type = lambda x: x.lower() == 'true', default = False)
+    parser.add_argument('--weather_prob', type = float, default = 0.5)
+    parser.add_argument('--use_depth_fog', type = lambda x: x.lower() == 'true', default = False)
+    
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
 
@@ -359,6 +365,11 @@ def main():
     train_cfg = config["training"]
     data_cfg = config["data"]
 
+    weather_aug = None
+    if args.enable_weather_aug and not args.use_depth_fog:
+        # create albumentations pipeline; dataset will control per-sample prob
+        weather_aug = get_albumentations_weather(prob = 1.0)
+    # when creating the train dataset, forward new args:
     train_dataset = ImageDataset(
         root = data_cfg["train_root"],
         split = data_cfg.get("train_split", "train"),
@@ -370,6 +381,9 @@ def main():
         lidar_h5_key = data_cfg.get("lidar_h5_key", None),
         lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
         flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
+        weather_aug = weather_aug,
+        weather_prob = args.weather_prob,
+        use_depth_fog = args.use_depth_fog
     )
     if data_cfg.get("max_train_samples", 0) and data_cfg["max_train_samples"] > 0:
         train_dataset = Subset(train_dataset, range(min(data_cfg["max_train_samples"], len(train_dataset))))
@@ -430,6 +444,10 @@ def main():
     print(f"\033[1mTrain samples:\033[0m {len(train_dataset)}")
     print(f"\033[1mLiDAR enabled:\033[0m {data_cfg.get('use_lidar', False)}")
     print(f"\033[1mLiDAR fusion enabled:\033[0m {config['model']['pixel_decoder'].get('use_lidar_fusion', False)}")
+    print(f"\033[1mWeather augmentation enabled:\033[0m {args.enable_weather_aug}")
+    if args.enable_weather_aug:
+        print(f"\033[1mWeather augmentation prob:\033[0m {args.weather_prob}")
+        print(f"\033[1mUse depth fog:\033[0m {args.use_depth_fog}")
     if val_loader:
         print(f"\033[1mVal samples:\033[0m   {len(val_dataset)}")
 
