@@ -1,16 +1,19 @@
 # COMP4471 UniDepthV1 - Repository Structure Guide
-Last Updated: 2026-03-10
+Last Updated: 2026-04-14
 
 ## Project Overview
 
-**UniDepthV1** is a monocular depth estimation model that predicts per-pixel depth from single RGB images. The project includes training and inference pipelines with support for evaluation against ground-truth depth maps.
+**UniDepthV1** is a monocular metric depth estimation model that predicts per-pixel depth from single RGB images. The project includes training and inference pipelines with support for evaluation against ground-truth depth maps, multi-dataset training, and comparison against pretrained baselines.
 
 **Key Features:**
-- Single-GPU training (no distributed training)
-- ConvNeXtV2-based encoder with pre-trained ImageNet weights
+- Single-GPU training with gradient accumulation and checkpointing
+- DINOv3 ViT-L encoder with layer-wise LR decay and encoder freezing
 - Multi-scale decoder with attention mechanisms
-- Multiple loss functions (regression, distillation, confidence, etc.)
-- Comprehensive evaluation metrics (D1, D2, D3, RMSE, SILog, etc.)
+- Multiple loss functions (SILog, regression, self-distillation)
+- Multi-dataset training (NYUv2 + SUN-RGBD + VKITTI2 + Sintel)
+- Baseline comparison (UniDepthV2, Depth Anything V2, Marigold)
+- Multi-benchmark evaluation (NYUv2, iBims-1, DIODE Indoor)
+- Comprehensive evaluation metrics (d1, d2, d3, RMSE, SILog, AbsRel, etc.)
 - TensorBoard logging during training
 
 ---
@@ -19,15 +22,28 @@ Last Updated: 2026-03-10
 
 ```
 COMP4471-project/
-├── README.md                           # Project overview and documentation
+├── README.md                           # Project overview, setup, and usage instructions
+├── REPOSITORY_STRUCTURE.md             # This file — detailed structure guide
 ├── environment.yml                     # Conda environment dependencies
 ├── libc++FIX.sh                        # Fix libc++ / pandas import issues on Linux
 │
-├── data/                               # Data loading modules
+├── data/                               # Dataset loaders
 │   ├── __init__.py
-│   ├── nyuv2_dataset.py               # NYU Depth V2 dataset loader (from .mat file)
+│   ├── nyuv2_dataset.py               # NYU Depth V2 loader (HDF5 .mat file)
+│   ├── sunrgbd_dataset.py             # SUN-RGBD indoor training dataset loader
+│   ├── vkitti2_dataset.py             # Virtual KITTI 2 synthetic training dataset loader
+│   ├── sintel_dataset.py              # MPI Sintel depth training dataset (HDF5 format)
+│   ├── ibims_dataset.py               # iBims-1 evaluation-only dataset (HDF5 format)
+│   ├── diode_dataset.py               # DIODE Indoor evaluation-only dataset (.npy depth)
+│   ├── kitti_dataset.py               # KITTI dataset loader
+│   ├── ToM_dataset.py                 # Transparent Object Matting dataset loader
 │   └── get_datasets/
-│       └── get_nyu_v2.sh              # Script to download nyu_depth_v2_labeled.mat
+│       ├── get_nyu_v2.sh              # Download NYUv2 (~2.8 GB)
+│       ├── get_training_datasets.sh   # Download SUN-RGBD, VKITTI2, Sintel, iBims-1, DIODE
+│       ├── get_booster.sh             # Download Booster dataset
+│       ├── get_diffusion4robustdepth.sh # Download Diffusion4RobustDepth dataset
+│       ├── hf_downloader.py           # HuggingFace dataset download helper
+│       └── phase01_prepare_nyuv2_lidar.py # Prepare NYUv2 LiDAR projected depth
 │
 ├── model/                              # Model architecture components
 │   ├── __init__.py
@@ -37,7 +53,17 @@ COMP4471-project/
 │   │   ├── __init__.py
 │   │   ├── convnext.py                # Original ConvNeXt backbone
 │   │   ├── convnext2.py               # ConvNeXtV2 backbone (improved)
-│   │   └── dinov2.py                  # DINO-V2 vision transformer
+│   │   ├── dinov2.py                  # DINO-V2 vision transformer
+│   │   └── metadinov3/               # DINOv3 backbone + pretrained weights
+│   │       └── dinov3-weights/        # ViT-S and ViT-L pretrained checkpoints
+│   │
+│   ├── baselines/                     # Pretrained baseline models for comparison
+│   │   ├── __init__.py
+│   │   ├── base.py                    # Abstract BaseDepthModel interface
+│   │   ├── registry.py               # Factory pattern with @register_baseline
+│   │   ├── unidepthv2.py             # UniDepth V2 (metric, zero-shot)
+│   │   ├── depth_anything_v2.py      # Depth Anything V2 (relative depth)
+│   │   └── marigold.py               # Marigold LCM (relative, diffusion-based)
 │   │
 │   ├── layers/                        # Custom neural network layers
 │   │   ├── __init__.py
@@ -54,30 +80,31 @@ COMP4471-project/
 │   ├── ops/                          # Operations and loss functions
 │   │   ├── __init__.py
 │   │   ├── scheduler.py              # Learning rate scheduler implementations
-│   │   │
 │   │   └── losses/                   # Loss function modules
 │   │       ├── __init__.py
 │   │       ├── regression.py         # Base regression loss with alpha-gamma weighting
 │   │       ├── silog.py              # Scale-Invariant Log loss
 │   │       ├── arel.py               # Absolute Relative Error loss
 │   │       ├── confidence.py         # Confidence-weighted loss
-│   │       ├── distill.py            # Teacher-student distillation losses
+│   │       ├── distill.py            # Teacher-student / self-distillation losses
 │   │       ├── local_ssi.py          # Local Scale-Shift invariance loss
 │   │       ├── dummy.py              # Placeholder loss for testing
 │   │       └── utils.py              # Loss utility functions
 │   │
 │   └── unidepthv1/                   # Main UniDepthV1 model architecture
 │       ├── __init__.py
-│       ├── unidepthv1.py             # Main model class (encoder + decoder)
+│       ├── unidepthv1.py             # Main model class (encoder + decoder + infer)
 │       └── decoder.py                # Depth decoder with camera head
 │
 ├── train/                              # Training pipeline
 │   ├── __init__.py
-│   └── train_depth.py                 # Single-GPU training script with TensorBoard logging
+│   ├── train_depth.py                 # Main training script (multi-dataset, warmup, accumulation)
+│   └── phase5_analyze.py             # Phase 5 ablation analysis utilities
 │
-├── infer/                              # Inference pipeline
+├── infer/                              # Inference & evaluation pipeline
 │   ├── __init__.py
-│   └── infer_depth.py                 # Inference script + optional evaluation
+│   ├── infer_depth.py                 # Inference script for our trained model
+│   └── eval_baselines.py             # Baseline evaluation (multi-benchmark)
 │
 ├── utils/                              # Utility modules
 │   ├── __init__.py
@@ -85,15 +112,20 @@ COMP4471-project/
 │   ├── constants.py                   # Dataset normalization constants, depth bins
 │   ├── coordinate.py                  # Coordinate grid generation
 │   ├── distributed.py                 # Distributed training utilities (not used)
-│   ├── evaluation_depth.py            # Evaluation metrics (D1, RMSE, SILog, etc.)
+│   ├── evaluation_depth.py            # Evaluation metrics (d1, RMSE, SILog, etc.)
 │   ├── geometric.py                   # Geometric operations (ray generation, depth conversion)
-│   ├── misc.py                        # Miscellaneous utilities (stacking, matching, profiling)
+│   ├── misc.py                        # Miscellaneous utilities (param groups, stacking, etc.)
 │   ├── sht.py                         # Spherical harmonics transform
 │   └── visualization.py               # Depth colorization and visualization
 │
-└── run_script/                         # Bash scripts for training and inference
-    ├── run_train.sh                   # Training script with configurable parameters (NYUv2)
-    └── run_infer_demo.sh              # Inference script with configurable parameters
+└── run_script/                         # Bash launch scripts
+    ├── run_train.sh                   # Main training script (NYUv2, ViT-L, ready to run)
+    ├── run_train_template.sh          # Training template (copy & edit for new experiments)
+    ├── run_train_vit.sh               # Training with ViT encoder variant
+    ├── run_infer.sh                   # Inference & evaluation for our model
+    ├── run_eval_baselines.sh          # Evaluate all 3 baseline models
+    ├── run_phase5_ablation.sh         # Phase 5 ablation experiments
+    └── organize_phase5_runs.sh        # Organize phase 5 run outputs
 ```
 
 ---
@@ -103,11 +135,12 @@ COMP4471-project/
 ### Core Model Architecture
 
 #### **model/unidepthv1/unidepthv1.py** - Main Model
-- Combines encoder (ConvNeXtV2) with decoder
+- Combines encoder (DINOv3 ViT-L or ConvNeXtV2) with decoder
 - Handles image preprocessing and padding/resizing
-- Outputs depth maps and camera intrinsics
+- Outputs metric depth maps (in metres) and camera intrinsics
+- `infer()`: Full inference pipeline (normalise → encode → decode → postprocess → 3D backproject)
+- `get_params()`: Returns param groups with separate encoder/decoder LRs and layer-wise decay
 - Uses `utils.geometric.generate_rays()` for 3D ray generation
-- Leverages `utils.misc.match_gt()` and `utils.misc.match_intrinsics()` for evaluation
 - **Dependencies:** encoder.py, decoder.py, utils (camera, geometric, misc, constants, visualization)
 
 #### **model/unidepthv1/decoder.py** - Decoder Network
@@ -121,12 +154,9 @@ COMP4471-project/
 - **Dependencies:** model/layers, utils (geometric, misc, sht)
 
 #### **model/encoder.py** - Encoder Wrapper
-- Loads backbone architectures (ConvNeXtV2, ConvNeXt, DINO-V2)
-- Wraps backbone to extract multi-scale features
-- Functions:
-  - `convnextv2_base()`: Loads ConvNeXtV2 base (128→256→512→1024 dims)
-  - `convnextv2_large()`: Loads ConvNeXtV2 large (192→384→768→1536 dims)
-  - Downloads pre-trained weights from Facebook AI's hub
+- Loads backbone architectures (DINOv3 ViT-S/L, ConvNeXtV2, ConvNeXt, DINO-V2)
+- Wraps backbone to extract multi-scale features at specified `output_idx` layers
+- Supports gradient checkpointing for memory efficiency on large models
 - **Dependencies:** backbones
 
 ### Backbone Architectures
@@ -144,6 +174,21 @@ COMP4471-project/
 #### **model/backbones/dinov2.py** - DINO-V2
 - Self-supervised vision transformer
 - Alternative backbone for feature extraction
+
+#### **model/backbones/metadinov3/** - DINOv3 (Primary Encoder)
+- Self-supervised ViT backbone with register tokens
+- **ViT-S** (`dinov3_vits16`): 22M params, output indices `[3, 6, 9, 12]`
+- **ViT-L** (`dinov3_vitl16`): 300M+ params, output indices `[5, 12, 18, 24]` (recommended)
+- Pretrained weights in `dinov3-weights/`
+
+### Baseline Models
+
+#### **model/baselines/** - Pretrained Comparison Models
+- `base.py`: Abstract `BaseDepthModel` with `predict_depth(rgb) → (B,1,H,W)` interface
+- `registry.py`: Factory pattern (`build_baseline(name, device)`)
+- `unidepthv2.py`: UniDepth V2 — metric depth, per-image inference, auto-downloads from HuggingFace
+- `depth_anything_v2.py`: Depth Anything V2 — relative depth, HF pipeline
+- `marigold.py`: Marigold LCM — relative depth, diffusion-based, configurable steps/ensembles
 
 ### Custom Layers
 
@@ -220,76 +265,107 @@ COMP4471-project/
 #### **data/nyuv2_dataset.py** - NYU Depth V2 Dataset
 - `NYUv2Dataset`: Loads the official NYU Depth V2 labeled split from `nyu_depth_v2_labeled.mat` (MATLAB v7.3 / HDF5 format)
 - 1449 densely labelled indoor RGBD pairs; uses the standard **Eigen et al. 654-image test split**
-- Args: `root`, `image_shape`, `depth_scale`, `split` (`"train"` / `"test"` / `"all"`), `flip_aug`, `return_intrinsics`
+- Args: `root`, `image_shape`, `depth_scale`, `split` (`"train"` / `"val"` / `"test"` / `"all"`), `flip_aug`, `return_intrinsics`
 - Built-in `flip_aug`: returns `(original, flipped)` tuples for **SelfDistill** invariance loss
 - Provides `NYUv2Dataset.collate_fn` that interleaves flipped pairs and separates tensor data from `img_metas`
 - Hard-coded `NYUV2_INTRINSICS` (fx, fy, cx, cy from the NYUv2 toolbox), depth range 0.005 – 10.0 m
 - Applies Eigen border-crop eval mask when `split="test"`
 - Lazy per-worker HDF5 file handle for DataLoader fork-safety
+- Optional LiDAR sparse depth loading for fusion experiments
 
-#### **data/get_datasets/get_nyu_v2.sh** - Dataset Download Script
+#### **data/sunrgbd_dataset.py** - SUN-RGBD Indoor Dataset
+- `SUNRGBDDataset`: Training dataset for indoor scenes
+- Recursively discovers scene folders with `image/` and `depth_bfx/` directories
+- Depth is uint16 millimetres → converted to metres
+- Loads per-scene intrinsics from `intrinsics.txt`
+- 90/10 deterministic train/test split (seed=42)
+- Depth range [0.005, 10.0] m
+
+#### **data/vkitti2_dataset.py** - Virtual KITTI 2 Dataset
+- `VKITTI2Dataset`: Synthetic outdoor training dataset
+- Matches RGB paths to depth paths via path substitution
+- Depth is 16-bit PNG / 100.0 = metres; fixed intrinsics (fx=725.0087)
+- Native resolution 1242×375
+- Depth range [0.01, 80.0] m
+
+#### **data/sintel_dataset.py** - MPI Sintel Depth Dataset
+- `SintelDataset`: Training dataset from UniDepth HDF5 format
+- Auto-discovers HDF5 structure via h5py visitor pattern
+- Handles byte-blob images and encoded depth maps
+- 90/10 deterministic split
+- Depth range [0.01, 100.0] m
+
+#### **data/ibims_dataset.py** - iBims-1 Evaluation Dataset
+- `IBims1Dataset`: High-quality indoor evaluation benchmark (HDF5 format)
+- Eval-only (no flip augmentation, no train split)
+- ~100 images with precise depth ground truth
+- Depth range [0.005, 10.0] m
+
+#### **data/diode_dataset.py** - DIODE Indoor Evaluation Dataset
+- `DIODEIndoorDataset`: High-precision LiDAR ground-truth indoor benchmark
+- File-based: RGB PNGs + `.npy` depth + `.npy` validity masks
+- Eval-only
+- Depth range [0.01, 50.0] m
+
+#### **data/kitti_dataset.py** - KITTI Dataset
+- `KITTIDataset`: Outdoor autonomous driving dataset loader
+- Used primarily for KITTI Eigen split evaluation
+
+#### **data/ToM_dataset.py** - Transparent Object Matting Dataset
+- `ToMDataset`: Transparent object depth dataset
+- Used for robustness evaluation on transparent/reflective surfaces
+
+#### **data/get_datasets/get_nyu_v2.sh** - NYUv2 Download Script
 - Downloads `nyu_depth_v2_labeled.mat` (~2.8 GB) from the MIT Silberman host
 - Saves to `./datasets/nyu_depth_v2_labeled.mat`
+
+#### **data/get_datasets/get_training_datasets.sh** - Multi-Dataset Download Script
+- Downloads SUN-RGBD (~5 GB), Virtual KITTI 2 (~15 GB), Sintel+iBims-1 HDF5, DIODE Indoor (~2.6 GB)
+- Supports `--skip-*` flags for selective download
+- Uses `wget` and `gdown` (for Google Drive files)
 
 ### Training Pipeline
 
 #### **train/train_depth.py** - Training Script
 - **Main Components:**
-  - Argument parsing with 40+ configurable parameters
-  - Model initialization from UniDepthV1
-  - DataLoader setup (DummyDataset or real data)
-  - Loss function selection and composition
-  - AdamW optimizer + CosineAnnealingLR scheduler
-  - TensorBoard logging (losses, LR, sample visualizations)
-  - Periodic checkpointing
-  - Gradient clipping and mixed precision support
+  - 50+ configurable parameters via argparse
+  - Multi-dataset training via `--datasets` (comma-separated: nyuv2, sunrgbd, vkitti2, sintel)
+  - Dataset factory `build_dataset()` with `ConcatDataset` support
+  - Separate encoder/decoder learning rates (`--encoder_lr`, `--layer_decay`)
+  - Linear LR warmup (`--warmup_steps`) + cosine annealing scheduler
+  - Gradient accumulation (`--accum_steps`)
+  - Encoder freezing for first N epochs (`--freeze_encoder_epochs`)
+  - AdamW optimizer with gradient clipping
+  - TensorBoard logging (losses, LR, depth visualisations, validation metrics)
+  - Periodic checkpointing with config saved
 
-- **Key Functions:**
-  - `get_args()`: Parameter definitions
-  - `train_epoch()`: Single epoch training loop
-  - `validate()`: Evaluation on validation set
-  - `main()`: Training orchestration
+- **Key Design:**
+  - `build_config()`: Constructs nested config dict for UniDepthV1 from flat args; critically sets `config["model"]["pixel_encoder"]["lr"]` and `config["training"]["ld"]` for proper encoder/decoder LR split
+  - `_unified_collate_fn()`: Compatible collate function across all dataset loaders
+  - Validation always runs on NYUv2 for consistent comparison
 
 - **Outputs:**
   ```
   runs/train_depth_<timestamp>/
-    checkpoints/     # Model weights
-    logs/            # TensorBoard logs
+    checkpoints/     # Model weights every SAVE_EVERY epochs
+    tensorboard/     # TensorBoard logs
+    run_script.sh    # Copy of launch script for reproducibility
   ```
-
-- **Dependencies:** 
-  - model.unidepthv1.UniDepthV1
-  - data (DummyDataset or DemoImageDataset)
-  - model.ops.losses (various loss functions)
-  - utils (camera, visualization, misc)
 
 ### Inference Pipeline
 
-#### **infer/infer_depth.py** - Inference Script
-- **Main Components:**
-  - Argument parsing
-  - Checkpoint loading and model reconstruction
-  - Batch inference on video frames or image folders
-  - Optional GT depth evaluation
-  - Visualization and result saving
+#### **infer/infer_depth.py** - Inference Script (Our Model)
+- Loads a trained checkpoint and evaluates on NYUv2 test set
+- Per-sample inference via `model.infer()` (handles normalisation, padding, ray generation internally)
+- Optional folder mode: runs on arbitrary images with optional GT depth for evaluation
+- Saves raw depth predictions (16-bit PNG), colorised depth maps, and error visualisations
+- Reports d1/d2/d3, RMSE, SILog, AbsRel metrics via `eval_depth()`
 
-- **Key Functions:**
-  - `get_args()`: Parameter definitions
-  - `infer_single()`: Single image inference
-  - `infer_batch()`: Batch processing
-  - `main()`: Inference orchestration
-
-- **Outputs:**
-  ```
-  output_dir/
-    predictions/     # Depth predictions (.npy)
-    visualizations/  # Colorized depth (.png)
-    metrics.json     # Evaluation scores (if GT available)
-  ```
-
-- **Dependencies:**
-  - model.unidepthv1.UniDepthV1
-  - utils (evaluation_depth, visualization, camera, misc)
+#### **infer/eval_baselines.py** - Baseline Evaluation Script
+- Evaluates pretrained baselines (UniDepthV2, Depth Anything V2, Marigold) via registry
+- Multi-benchmark support via `--eval_datasets` (nyuv2, ibims1, diode_indoor)
+- Handles SSI/SI alignment for relative-depth models
+- Prints per-benchmark summary table and saves JSON metrics
 
 ### Utilities
 
@@ -361,21 +437,22 @@ Training Flow:
 train/train_depth.py
   ├─→ model/unidepthv1/unidepthv1.py (model)
   │   ├─→ model/encoder.py
-  │   │   └─→ model/backbones/ (ConvNeXtV2)
+  │   │   └─→ model/backbones/ (DINOv3 ViT-L / ConvNeXtV2)
   │   ├─→ model/unidepthv1/decoder.py
   │   │   ├─→ model/layers/ (attention, mlp, upsample, etc.)
   │   │   └─→ utils/geometric.py
   │   └─→ utils/ (camera, misc, constants, visualization)
   │
-  ├─→ data/dummy_dataset.py or demo_dataset.py (data)
+  ├─→ data/ (via build_dataset factory)
+  │   ├─→ nyuv2_dataset.py     (primary)
+  │   ├─→ sunrgbd_dataset.py   (optional)
+  │   ├─→ vkitti2_dataset.py   (optional)
+  │   └─→ sintel_dataset.py    (optional)
   │
   ├─→ model/ops/losses/ (loss functions)
-  │   ├─→ regression.py
-  │   ├─→ silog.py
-  │   ├─→ confidence.py
-  │   ├─→ distill.py
-  │   ├─→ local_ssi.py
-  │   └─→ utils.py
+  │   ├─→ silog.py         (depth loss)
+  │   ├─→ regression.py    (camera loss)
+  │   └─→ distill.py       (self-distillation loss)
   │
   └─→ utils/
       ├─→ camera.py
@@ -384,12 +461,18 @@ train/train_depth.py
       ├─→ misc.py
       └─→ visualization.py
 
-Inference Flow:
+Inference Flow (our model):
 infer/infer_depth.py
-  ├─→ model/unidepthv1/unidepthv1.py (model)
-  ├─→ utils/evaluation_depth.py (metrics, if GT available)
-  ├─→ utils/visualization.py (depth colorization)
-  └─→ utils/misc.py (GT matching)
+  ├─→ model/unidepthv1/unidepthv1.py  → model.infer()
+  ├─→ data/nyuv2_dataset.py           (dataset eval)
+  ├─→ utils/evaluation_depth.py       (metrics)
+  └─→ utils/visualization.py          (depth colorization)
+
+Baseline Evaluation Flow:
+infer/eval_baselines.py
+  ├─→ model/baselines/ (UniDepthV2, DA-V2, Marigold)
+  ├─→ data/ (nyuv2, ibims1, diode loaders via build_eval_dataset)
+  └─→ utils/evaluation_depth.py (metrics)
 ```
 
 ---
@@ -398,29 +481,40 @@ infer/infer_depth.py
 
 ### Training Data Flow
 ```
-DummyDataset/DemoImageDataset
-    ↓ (batches of images + depth + camera intrinsics)
-DataLoader
+Datasets (NYUv2 + optional SUN-RGBD, VKITTI2, Sintel)
+    ↓ build_dataset() → ConcatDataset
+    ↓ DataLoader (shuffle, drop_last, _unified_collate_fn)
     ↓
 train_depth.py
-    ├─→ UniDepthV1 (forward pass)
-    │   └─→ generates predictions (depth, camera params)
-    ├─→ Loss Functions (compute loss)
-    └─→ Backward + optimize
+    ├─→ UniDepthV1.forward_train()
+    │   ├─→ Encoder (DINOv3 ViT-L, frozen first N epochs)
+    │   ├─→ Decoder (depth + camera predictions)
+    │   └─→ Loss computation (SILog + Regression + SelfDistill)
+    ├─→ Gradient accumulation + clipping
+    ├─→ Warmup scheduler → Cosine annealing
+    └─→ Validation on NYUv2 (RMSE, AbsRel)
 ```
 
 ### Inference Data Flow
 ```
-Input Images (folder or file)
+Input: NYUv2 test set or image folder
     ↓
 infer_depth.py
-    ├─→ Load checkpoint
-    ├─→ Reconstruct UniDepthV1
-    └─→ Forward pass
-        ├─→ generate depth predictions
-        ├─→ colorize_visualization
-        ├─→ save_predictions
-        └─→ (optional) evaluate_vs_gt
+    ├─→ Load checkpoint → reconstruct UniDepthV1
+    ├─→ model.infer(rgb_uint8, intrinsics)
+    │   └─→ normalise → pad → encode → decode → unpad → 3D backproject
+    ├─→ eval_depth() if GT available
+    └─→ Save: depth PNGs, colorised vis, metrics JSON
+```
+
+### Baseline Evaluation Flow
+```
+eval_baselines.py --eval_datasets nyuv2,ibims1,diode_indoor
+    ↓ for each dataset:
+    ├─→ build_eval_dataset(name) → DataLoader
+    ├─→ model.predict_depth(rgb) per batch
+    ├─→ eval_depth() per sample
+    └─→ Print summary table + save JSON
 ```
 
 ---

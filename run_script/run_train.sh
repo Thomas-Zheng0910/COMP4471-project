@@ -10,20 +10,26 @@ export HF_HUB_CACHE="./cache"
 
 # Experiment Configuration
 SEED=648
-CUDA=3
-EPOCHS=50
-BATCH_SIZE=2
+CUDA=7
+EPOCHS=200
+BATCH_SIZE=4
 LR=1e-4
+ENCODER_LR=1e-5
+LAYER_DECAY=0.9
 LR_MIN=1e-6
 WEIGHT_DECAY=0.01
 CLIP_VALUE=1.0
 LOG_EVERY=50
-SAVE_EVERY=1
+SAVE_EVERY=10
+ACCUM_STEPS=4
+WARMUP_STEPS=500
+FREEZE_ENCODER_EPOCHS=5
 
 # Model Architecture — Pixel Encoder
-ENCODER_NAME="dinov3_vits16"
-OUTPUT_IDX="" # Set to empty string to use encoder default output indices
-USE_CHECKPOINT="false"
+ENCODER_NAME="dinov3_vitl16"
+PRETRAINED="./model/backbones/metadinov3/dinov3-weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
+OUTPUT_IDX="5 12 18 24"
+USE_CHECKPOINT="true"
 
 # Model Architecture — Pixel Decoder
 HIDDEN_DIM=512
@@ -36,16 +42,16 @@ EXPANSION=4
 DEPTH_LOSS_NAME="SILog"
 DEPTH_LOSS_WEIGHT=10.0
 CAMERA_LOSS_NAME="Regression"
-CAMERA_LOSS_WEIGHT=0.5
+CAMERA_LOSS_WEIGHT=0.1
 INVARIANCE_LOSS_NAME="SelfDistill"
-INVARIANCE_LOSS_WEIGHT=0.1
+INVARIANCE_LOSS_WEIGHT=0.01
 
 # Data Configuration
-TRAIN_ROOT="datasets/nyu_depth_v2_labeled.mat"
 VAL_ROOT="datasets/nyu_depth_v2_labeled.mat"
 IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
 NUM_WORKERS=4
+DATASETS="nyuv2,sunrgbd,vkitti2,sintel"
 
 # Checkpoint Resume (leave empty for fresh start)
 RESUME=""
@@ -57,11 +63,16 @@ CMD="python -m train.train_depth \
     --epochs $EPOCHS \
     --batch_size $BATCH_SIZE \
     --lr $LR \
+    --encoder_lr $ENCODER_LR \
+    --layer_decay $LAYER_DECAY \
     --lr_min $LR_MIN \
     --weight_decay $WEIGHT_DECAY \
     --clip_value $CLIP_VALUE \
     --log_every $LOG_EVERY \
     --save_every $SAVE_EVERY \
+    --accum_steps $ACCUM_STEPS \
+    --warmup_steps $WARMUP_STEPS \
+    --freeze_encoder_epochs $FREEZE_ENCODER_EPOCHS \
     --encoder_name $ENCODER_NAME \
     --use_checkpoint $USE_CHECKPOINT \
     --hidden_dim $HIDDEN_DIM \
@@ -75,10 +86,10 @@ CMD="python -m train.train_depth \
     --camera_loss_weight $CAMERA_LOSS_WEIGHT \
     --invariance_loss_name $INVARIANCE_LOSS_NAME \
     --invariance_loss_weight $INVARIANCE_LOSS_WEIGHT \
-    --train_root $TRAIN_ROOT \
     --image_shape $IMAGE_SHAPE \
     --depth_scale $DEPTH_SCALE \
     --num_workers $NUM_WORKERS \
+    --datasets $DATASETS \
     --script_path $0"
 
 # Add conditional arguments
@@ -92,6 +103,10 @@ fi
 
 if [ -n "$OUTPUT_IDX" ]; then
     CMD="$CMD --output_idx $OUTPUT_IDX"
+fi
+
+if [ -n "$PRETRAINED" ]; then
+    CMD="$CMD --pretrained $PRETRAINED"
 fi
 
 # Execute Command

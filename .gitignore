@@ -49,3 +49,4 @@ docs/figures/
 docs/phase5_lidar_vs_rgb_diagnosis.md
 docs/phase5_paper_draft.md
 docs/phase5_sections/04_execution_plan_p0_p2.md
+model/backbones/metadinov3/dinov3-weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth

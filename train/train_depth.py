@@ -20,10 +20,10 @@ from time import time
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from torch.utils.tensorboard import SummaryWriter
 
-from data.nyuv2_dataset import NYUv2Dataset as ImageDataset
+from data.nyuv2_dataset import NYUv2Dataset
 from model.unidepthv1.unidepthv1 import UniDepthV1
 from utils.camera import Pinhole
 from utils.visualization import colorize
@@ -42,11 +42,21 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--batch_size', type=int, default=4)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--encoder_lr', type=float, default=1e-5,
+                        help='Encoder LR (default: 10x lower than decoder)')
+    parser.add_argument('--layer_decay', type=float, default=0.9,
+                        help='Layer-wise LR decay for encoder')
     parser.add_argument('--lr_min', type=float, default=1e-6)
     parser.add_argument('--weight_decay', type=float, default=0.01)
     parser.add_argument('--clip_value', type=float, default=1.0)
     parser.add_argument('--log_every', type=int, default=50)
     parser.add_argument('--save_every', type=int, default=1)
+    parser.add_argument('--accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps (effective batch = batch_size * accum_steps)')
+    parser.add_argument('--warmup_steps', type=int, default=500,
+                        help='Linear LR warmup steps (0 to disable)')
+    parser.add_argument('--freeze_encoder_epochs', type=int, default=0,
+                        help='Freeze encoder for first N epochs')
 
     # Model architecture
     parser.add_argument('--encoder_name', type=str, default='convnextv2_large')
@@ -93,6 +103,10 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--max_train_samples', type=int, default=0, help='Use first N training samples (0=all)')
     parser.add_argument('--max_val_samples', type=int, default=0, help='Use first N validation samples (0=all)')
+    parser.add_argument('--datasets', type=str, default='nyuv2',
+                        help='Comma-separated training dataset names (e.g. "nyuv2,sunrgbd,vkitti2,sintel")')
+    parser.add_argument('--dataset_roots', type=str, default=None,
+                        help='Comma-separated roots matching --datasets (uses defaults if omitted)')
 
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
@@ -120,6 +134,7 @@ def build_config(args: argparse.Namespace) -> dict:
                 # If output_idx is None, don't set this key
                 **({"output_idx": args.output_idx} if args.output_idx is not None else {}),
                 "use_checkpoint": args.use_checkpoint,
+                "lr": args.encoder_lr,
             },
             "pixel_decoder": {
                 "name": "Decoder",
@@ -136,6 +151,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "epochs": args.epochs,
             "batch_size": args.batch_size,
             "lr": args.lr,
+            "ld": args.layer_decay,
             "lr_min": args.lr_min,
             "wd": args.weight_decay,
             "log_every": args.log_every,
@@ -187,6 +203,74 @@ def build_config(args: argparse.Namespace) -> dict:
             "phase4_eval_fallback": args.phase4_eval_fallback,
         },
     }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Dataset factory
+# ──────────────────────────────────────────────────────────────────────────────
+
+DATASET_DEFAULT_ROOTS = {
+    "nyuv2": "datasets/nyu_depth_v2_labeled.mat",
+    "sunrgbd": "datasets/SUNRGBD",
+    "vkitti2": "datasets/virtual_kitti_2",
+    "sintel": "datasets/unidepth_data",
+}
+
+
+def _unified_collate_fn(batch):
+    """Collate function compatible with all dataset outputs."""
+    # Unpack paired (original, flipped) tuples from flip_aug=True datasets
+    if batch and isinstance(batch[0], (list, tuple)) and len(batch[0]) == 2:
+        flat = []
+        for orig, flipped in batch:
+            flat.append(orig)
+            flat.append(flipped)
+        batch = flat
+
+    META_KEYS = {"flip", "si"}
+    img_metas = [{k: item[k] for k in META_KEYS if k in item} for item in batch]
+    data_keys = [k for k in batch[0].keys() if k not in META_KEYS]
+    collated = {}
+    for key in data_keys:
+        vals = [item[key] for item in batch]
+        collated[key] = torch.stack(vals, dim=0) if isinstance(vals[0], torch.Tensor) else vals
+    return {"data": collated, "img_metas": img_metas}
+
+
+def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = None,
+                  flip_aug: bool = False, extra_kwargs: dict = None):
+    """Build a dataset by name with common parameters."""
+    root = root_override or DATASET_DEFAULT_ROOTS.get(name)
+    image_shape = data_cfg["image_shape"]
+    depth_scale = data_cfg.get("depth_scale", 1.0)
+
+    if name == "nyuv2":
+        return NYUv2Dataset(
+            root=root or data_cfg.get("train_root"),
+            split=split,
+            image_shape=image_shape,
+            depth_scale=depth_scale,
+            use_lidar=data_cfg.get("use_lidar", False),
+            lidar_root=data_cfg.get("lidar_root"),
+            lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
+            lidar_h5_key=data_cfg.get("lidar_h5_key"),
+            lidar_confidence_h5_key=data_cfg.get("lidar_confidence_h5_key"),
+            flip_aug=flip_aug,
+        )
+    elif name == "sunrgbd":
+        from data.sunrgbd_dataset import SUNRGBDDataset
+        return SUNRGBDDataset(root=root, split=split, image_shape=image_shape,
+                              depth_scale=depth_scale, flip_aug=flip_aug)
+    elif name == "vkitti2":
+        from data.vkitti2_dataset import VKITTI2Dataset
+        return VKITTI2Dataset(root=root, split=split, image_shape=image_shape,
+                              depth_scale=depth_scale, flip_aug=flip_aug)
+    elif name == "sintel":
+        from data.sintel_dataset import SintelDataset
+        return SintelDataset(root=root, split=split, image_shape=image_shape,
+                             depth_scale=depth_scale, flip_aug=flip_aug)
+    else:
+        raise ValueError(f"Unknown dataset: {name}. Available: {list(DATASET_DEFAULT_ROOTS.keys())}")
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -359,18 +443,36 @@ def main():
     train_cfg = config["training"]
     data_cfg = config["data"]
 
-    train_dataset = ImageDataset(
-        root = data_cfg["train_root"],
-        split = data_cfg.get("train_split", "train"),
-        image_shape = data_cfg["image_shape"],
-        depth_scale = data_cfg.get("depth_scale", 1.0),
-        use_lidar = data_cfg.get("use_lidar", False),
-        lidar_root = data_cfg.get("lidar_root", None),
-        lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
-        lidar_h5_key = data_cfg.get("lidar_h5_key", None),
-        lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
-        flip_aug = True,   # produce (original, flipped) pairs for SelfDistill
-    )
+    # Multi-dataset training support
+    dataset_names = [d.strip() for d in args.datasets.split(",")]
+    dataset_roots_override = {}
+    if args.dataset_roots:
+        roots = [r.strip() for r in args.dataset_roots.split(",")]
+        for name, root in zip(dataset_names, roots):
+            if root:
+                dataset_roots_override[name] = root
+    # Use train_root as override for nyuv2 if specified
+    if data_cfg.get("train_root") and "nyuv2" in dataset_names:
+        dataset_roots_override.setdefault("nyuv2", data_cfg["train_root"])
+
+    train_datasets = []
+    for ds_name in dataset_names:
+        ds = build_dataset(
+            ds_name,
+            split="train",
+            data_cfg=data_cfg,
+            root_override=dataset_roots_override.get(ds_name),
+            flip_aug=True,
+        )
+        train_datasets.append(ds)
+        print(f"  {ds_name}: {len(ds)} train samples")
+
+    if len(train_datasets) == 1:
+        train_dataset = train_datasets[0]
+    else:
+        train_dataset = ConcatDataset(train_datasets)
+        print(f"  Combined: {len(train_dataset)} total train samples")
+
     if data_cfg.get("max_train_samples", 0) and data_cfg["max_train_samples"] > 0:
         train_dataset = Subset(train_dataset, range(min(data_cfg["max_train_samples"], len(train_dataset))))
     train_loader = DataLoader(
@@ -380,16 +482,15 @@ def main():
         num_workers = data_cfg.get("num_workers", 4),
         pin_memory = device.type == "cuda",
         drop_last = True,
-        collate_fn = ImageDataset.collate_fn,
+        collate_fn = _unified_collate_fn,
     )
 
-    # Optional validation loader
-    # NOTE: New protocol: use val_split if available, else fall back to test_split (for backward compat)
+    # Optional validation loader (always NYUv2 for consistency)
     val_loader = None
     if data_cfg.get("val_root") is not None:
         val_split_name = data_cfg.get("val_split", "val")
         try:
-            val_dataset = ImageDataset(
+            val_dataset = NYUv2Dataset(
                 root = data_cfg["val_root"],
                 split = val_split_name,
                 image_shape = data_cfg["image_shape"],
@@ -401,9 +502,8 @@ def main():
                 lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
             )
         except ValueError:
-            # Fallback: if val_split does not exist, try test_split (legacy compat)
             test_split_name = data_cfg.get("test_split", "test")
-            val_dataset = ImageDataset(
+            val_dataset = NYUv2Dataset(
                 root = data_cfg["val_root"],
                 split = test_split_name,
                 image_shape = data_cfg["image_shape"],
@@ -423,7 +523,7 @@ def main():
             shuffle = False,
             num_workers = data_cfg.get("num_workers", 4),
             pin_memory = device.type == "cuda",
-            collate_fn = ImageDataset.collate_fn,
+            collate_fn = _unified_collate_fn,
         )
 
     # verbose
@@ -437,8 +537,12 @@ def main():
     # Use model.get_params() for layer-wise LR decay (encoder vs decoder)
     try:
         param_groups = model.get_params(config)
-    except Exception:
-        # Fallback: treat all parameters uniformly
+        print(f"\033[92m[OK] model.get_params() succeeded — using separate encoder/decoder LRs\033[0m")
+        for i, pg in enumerate(param_groups):
+            print(f"  param_group[{i}]: lr={pg.get('lr', 'default')}, #params={len(pg['params'])}, wd={pg.get('weight_decay', 'default')}")
+    except Exception as e:
+        print(f"\033[93m[WARN] model.get_params() failed: {e}")
+        print(f"  Falling back to uniform LR for all parameters — encoder may overfit!\033[0m")
         param_groups = model.parameters()
 
     optimizer = torch.optim.AdamW(
@@ -447,13 +551,36 @@ def main():
         weight_decay = train_cfg["wd"],
     )
 
-    # Set up LR Scheduler
+    # Set up LR Scheduler (warmup + cosine annealing)
     num_epochs = train_cfg["epochs"]
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+    cosine_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer,
         T_max = num_epochs,
         eta_min = train_cfg.get("lr_min", 1e-6),
     )
+    warmup_steps = args.warmup_steps
+    if warmup_steps > 0:
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=1e-3, total_iters=warmup_steps,
+        )
+        # Warmup operates per-step; cosine operates per-epoch.
+        # We'll step warmup manually and switch to cosine after warmup.
+        using_warmup = True
+        warmup_done = False
+        warmup_step_count = 0
+        print(f"\033[1mLR warmup: {warmup_steps} steps\033[0m")
+    else:
+        using_warmup = False
+        warmup_done = True
+    scheduler = cosine_scheduler
+
+    # Gradient accumulation
+    accum_steps = args.accum_steps
+    if accum_steps > 1:
+        print(f"\033[1mGradient accumulation: {accum_steps} steps (effective batch = {train_cfg['batch_size'] * accum_steps * 2})\033[0m")
+
+    # Encoder freezing
+    freeze_encoder_epochs = args.freeze_encoder_epochs
 
     # OPTIONAL: Resume from checkpoint
     start_epoch = 0
@@ -480,6 +607,18 @@ def main():
     # Training loop #
     # ############# #
     for epoch in range(start_epoch, num_epochs):
+
+        # Encoder freezing for first N epochs
+        if freeze_encoder_epochs > 0:
+            if epoch < freeze_encoder_epochs:
+                if epoch == start_epoch:
+                    for p in model.pixel_encoder.parameters():
+                        p.requires_grad = False
+                    print(f"\033[93m[FREEZE] Encoder frozen for epochs 0-{freeze_encoder_epochs - 1}\033[0m")
+            elif epoch == freeze_encoder_epochs:
+                for p in model.pixel_encoder.parameters():
+                    p.requires_grad = True
+                print(f"\033[92m[UNFREEZE] Encoder unfrozen at epoch {epoch}\033[0m")
 
         model.train()
         epoch_loss = 0.0
@@ -548,7 +687,8 @@ def main():
             image_metas = batch['img_metas']
 
             # Forward pass
-            optimizer.zero_grad()
+            if accum_steps <= 1:
+                optimizer.zero_grad()
             outputs, losses = model.forward(inputs, image_metas)
 
             # Compute total loss
@@ -570,12 +710,24 @@ def main():
                 print(f"  [WARNING] Non-finite loss at step {global_step}, skipping.")
                 continue
 
-            # Backward + optimize
+            # Backward (with gradient accumulation)
+            if accum_steps > 1:
+                total_loss = total_loss / accum_steps
             total_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
 
-            epoch_loss += total_loss.item()
+            if accum_steps <= 1 or (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                optimizer.zero_grad()
+                # Step warmup scheduler per optimizer step
+                if using_warmup and not warmup_done:
+                    warmup_scheduler.step()
+                    warmup_step_count += 1
+                    if warmup_step_count >= warmup_steps:
+                        warmup_done = True
+                        print(f"\033[92m[WARMUP] Warmup complete at step {global_step}\033[0m")
+
+            epoch_loss += total_loss.item() * (accum_steps if accum_steps > 1 else 1)
             num_batches += 1
             global_step += 1
 

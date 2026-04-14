@@ -1,10 +1,10 @@
 #!/bin/bash
 
-# run_infer.sh — Inference and evaluation script for UniDepthV1.
+# run_infer_template.sh — Template for inference & evaluation with UniDepthV1.
 #
-# Evaluates a trained checkpoint on the NYUv2 test set and/or a custom
-# image folder. Copy and fill in the "..." placeholders before running:
-#   bash run_script/run_infer.sh
+# Copy this file and fill in the "..." placeholders before running:
+#   cp run_script/run_infer_template.sh run_script/run_infer_myexp.sh
+#   bash run_script/run_infer_myexp.sh
 
 # Cache directory
 export TORCH_HOME="./cache"
@@ -14,18 +14,18 @@ export HF_HUB_CACHE="./cache"
 
 # ─── Checkpoint & output ─────────────────────────────────────────────────────
 # Path to the .pth checkpoint saved by train_depth.py
-CHECKPOINT="..."
+CHECKPOINT="..."                          # e.g. "runs/train_depth_.../best.pth"
 
 # Where to write metrics JSON and visualisations
 OUTPUT_DIR="runs/infer"
 
 # ─── Device ──────────────────────────────────────────────────────────────────
-CUDA=0
+CUDA=...                                    # GPU index
 
 # ─── Dataset evaluation ─────────────────────────────────────────────────────
-# Path to dataset file (set to "" to skip dataset evaluation)
+# Path to NYUv2 .mat file (set to "" to skip dataset evaluation)
 DATA_ROOT="datasets/nyu_depth_v2_labeled.mat"
-# Which split to evaluate
+# Which split to evaluate: "train" (795 samples) or "test" (654 samples)
 SPLIT="test"
 
 # ─── Folder inference (optional) ─────────────────────────────────────────────
@@ -38,22 +38,24 @@ SPLIT="test"
 IMAGE_FOLDER=""
 
 # ─── Depth settings ──────────────────────────────────────────────────────────
-# Scale factor to convert raw depth values to metres (dataset eval uses its own)
+# Scale factor to convert raw depth values to metres (for folder-mode GT PNGs)
 DEPTH_SCALE=0.001
 
 # Maximum depth (metres) used as upper cap during evaluation
 MAX_DEPTH=10.0
 
 # ─── Model architecture (must exactly match the checkpoint) ──────────────────
+# Options: "dinov3_vits16" (small), "dinov3_vitl16" (large), "convnextv2_large"
 ENCODER_NAME="dinov3_vitl16"
 
-# Feature-map indices for the encoder
+# Encoder feature-map output indices
 # dinov3_vits16: "3 6 9 12",  dinov3_vitl16: "5 12 18 24"
 OUTPUT_IDX="5 12 18 24"
 
+# Gradient checkpointing (not needed at inference, but must match if loading state)
 USE_CHECKPOINT="false"
 
-# Decoder settings
+# Decoder settings (must match training)
 HIDDEN_DIM=512
 DROPOUT=0.0
 DEPTHS="3 2 1"
@@ -93,17 +95,15 @@ CMD="python -m infer.infer_depth \
     --use_lidar_fusion $USE_LIDAR_FUSION \
     --lidar_fusion_type $LIDAR_FUSION_TYPE"
 
-# Append data_root only when it is non-empty
+# Append optional arguments only when non-empty
 if [ -n "$DATA_ROOT" ]; then
     CMD="$CMD --data_root $DATA_ROOT"
 fi
 
-# Append image_folder only when it is non-empty
 if [ -n "$IMAGE_FOLDER" ]; then
     CMD="$CMD --image_folder $IMAGE_FOLDER"
 fi
 
-# Append output_idx only when it is non-empty
 if [ -n "$OUTPUT_IDX" ]; then
     CMD="$CMD --output_idx $OUTPUT_IDX"
 fi
