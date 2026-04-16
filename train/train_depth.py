@@ -262,9 +262,9 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
         return SUNRGBDDataset(root=root, split=split, image_shape=image_shape,
                               depth_scale=depth_scale, flip_aug=flip_aug)
     elif name == "vkitti2":
-        from data.vkitti2_dataset import VKITTI2Dataset
-        return VKITTI2Dataset(root=root, split=split, image_shape=image_shape,
-                              depth_scale=depth_scale, flip_aug=flip_aug)
+        from data.vkitti2_dataset import VirtualKITTI2Dataset
+        return VirtualKITTI2Dataset(root=root, split=split, image_shape=image_shape,
+                                    depth_scale=depth_scale, flip_aug=flip_aug)
     elif name == "sintel":
         from data.sintel_dataset import SintelDataset
         return SintelDataset(root=root, split=split, image_shape=image_shape,
