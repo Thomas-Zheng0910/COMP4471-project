@@ -1,5 +1,6 @@
 # Ignore datasets
 datasets/
+/datasets
 
 # Python
 __pycache__/

@@ -43,7 +43,7 @@ dependencies:
       
       # Baseline models
       - diffusers>=0.30.0
-      - unidepth
+      # - unidepth <- this is not a valid package
 
       # Additional libraries
       - accelerate>=1.9.0
@@ -57,6 +57,3 @@ dependencies:
 # conda env create -f environment.yml
 # Remove
 # conda env remove -n <ENV name>
-
-
-# tensorboard --logdir 
