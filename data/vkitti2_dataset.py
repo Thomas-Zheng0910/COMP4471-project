@@ -70,24 +70,35 @@ def _default_depth_transform(shape: Optional[Tuple[int, int]]) -> Callable:
 def _collect_vkitti2_pairs(root: Path) -> List[Tuple[Path, Path]]:
     """
     Find all (rgb, depth) pairs across all scenes/variations/cameras.
+
+    Supports two directory layouts:
+      1. Official split: root/vkitti_2.0.3_rgb/Scene*/…  + root/vkitti_2.0.3_depth/Scene*/…
+      2. Flat scenes:    root/Scene*/{variation}/frames/rgb/Camera_*/rgb_*.jpg
+                         root/Scene*/{variation}/frames/depth/Camera_*/depth_*.png
     """
+    # Layout 1: official vkitti_2.0.3_rgb / vkitti_2.0.3_depth split
     rgb_base = root / "vkitti_2.0.3_rgb"
     depth_base = root / "vkitti_2.0.3_depth"
 
-    if not rgb_base.exists():
-        raise FileNotFoundError(f"RGB directory not found: {rgb_base}")
-    if not depth_base.exists():
-        raise FileNotFoundError(f"Depth directory not found: {depth_base}")
+    if rgb_base.exists() and depth_base.exists():
+        pairs = []
+        for rgb_path in sorted(rgb_base.rglob("rgb_*.jpg")):
+            rel = rgb_path.relative_to(rgb_base)
+            depth_rel = Path(str(rel).replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png"))
+            depth_path = depth_base / depth_rel
+            if depth_path.exists():
+                pairs.append((rgb_path, depth_path))
+        if pairs:
+            return pairs
 
+    # Layout 2: flat scenes — rgb and depth are siblings under frames/
     pairs = []
-    for rgb_path in sorted(rgb_base.rglob("rgb_*.jpg")):
-        # Convert rgb path to depth path:
-        #   .../vkitti_2.0.3_rgb/Scene01/clone/frames/rgb/Camera_0/rgb_00000.jpg
-        #   → .../vkitti_2.0.3_depth/Scene01/clone/frames/depth/Camera_0/depth_00000.png
-        rel = rgb_path.relative_to(rgb_base)
+    for rgb_path in sorted(root.rglob("rgb_*.jpg")):
+        # .../Scene01/clone/frames/rgb/Camera_0/rgb_00000.jpg
+        # → .../Scene01/clone/frames/depth/Camera_0/depth_00000.png
+        rel = rgb_path.relative_to(root)
         depth_rel = Path(str(rel).replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png"))
-        depth_path = depth_base / depth_rel
-
+        depth_path = root / depth_rel
         if depth_path.exists():
             pairs.append((rgb_path, depth_path))
 

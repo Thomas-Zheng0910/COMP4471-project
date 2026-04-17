@@ -8,12 +8,15 @@ export TRANSFORMERS_CACHE="./cache"
 export HF_HOME="./cache"
 export HF_HUB_CACHE="./cache"
 
+# Reduce CUDA memory fragmentation
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
 # Experiment Configuration
 SEED=648
-CUDA=7
+CUDA=4
 # EPOCHS=200
 EPOCHS=100
-BATCH_SIZE=2
+BATCH_SIZE=1
 LR=1e-4 # try 1e-2
 ENCODER_LR=1e-5
 LAYER_DECAY=0.9
@@ -22,9 +25,10 @@ WEIGHT_DECAY=0.01
 CLIP_VALUE=1.0
 LOG_EVERY=50
 SAVE_EVERY=10
-ACCUM_STEPS=8
+ACCUM_STEPS=16
 WARMUP_STEPS=500
 FREEZE_ENCODER_EPOCHS=5
+AMP=true  # set true when GPU memory is limited (shared GPUs, etc.)
 
 # Model Architecture — Pixel Encoder
 ENCODER_NAME="dinov3_vitl16"
@@ -51,7 +55,8 @@ INVARIANCE_LOSS_WEIGHT=0.01
 VAL_ROOT="datasets/nyu_depth_v2_labeled.mat"
 IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
-NUM_WORKERS=4
+NUM_WORKERS=8
+MAX_TRAIN_SAMPLES=10000  # cap samples per epoch (0=use all; full dataset is ~49k)
 DATASETS="nyuv2,sunrgbd,vkitti2,sintel"
 
 # Checkpoint Resume (leave empty for fresh start)
@@ -91,6 +96,7 @@ CMD="python -m train.train_depth \
     --depth_scale $DEPTH_SCALE \
     --num_workers $NUM_WORKERS \
     --datasets $DATASETS \
+    --max_train_samples $MAX_TRAIN_SAMPLES \
     --script_path $0"
 
 # Add conditional arguments
@@ -108,6 +114,10 @@ fi
 
 if [ -n "$PRETRAINED" ]; then
     CMD="$CMD --pretrained $PRETRAINED"
+fi
+
+if [ "$AMP" = "true" ]; then
+    CMD="$CMD --amp"
 fi
 
 # Execute Command

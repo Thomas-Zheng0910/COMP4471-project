@@ -20,7 +20,7 @@ from time import time
 from tqdm import tqdm
 
 import torch
-from torch.utils.data import ConcatDataset, DataLoader, Subset
+from torch.utils.data import ConcatDataset, DataLoader, RandomSampler, Subset
 from torch.utils.tensorboard import SummaryWriter
 
 from data.nyuv2_dataset import NYUv2Dataset
@@ -57,6 +57,8 @@ def get_args() -> argparse.Namespace:
                         help='Linear LR warmup steps (0 to disable)')
     parser.add_argument('--freeze_encoder_epochs', type=int, default=0,
                         help='Freeze encoder for first N epochs')
+    parser.add_argument('--amp', action='store_true', default=False,
+                        help='Enable mixed precision (AMP) to reduce GPU memory usage')
 
     # Model architecture
     parser.add_argument('--encoder_name', type=str, default='convnextv2_large')
@@ -473,16 +475,25 @@ def main():
         train_dataset = ConcatDataset(train_datasets)
         print(f"  Combined: {len(train_dataset)} total train samples")
 
-    if data_cfg.get("max_train_samples", 0) and data_cfg["max_train_samples"] > 0:
-        train_dataset = Subset(train_dataset, range(min(data_cfg["max_train_samples"], len(train_dataset))))
+    max_train = data_cfg.get("max_train_samples", 0)
+    train_sampler = None
+    train_shuffle = True
+    if max_train and max_train > 0 and max_train < len(train_dataset):
+        train_sampler = RandomSampler(train_dataset, replacement=False,
+                                      num_samples=max_train)
+        train_shuffle = False  # sampler and shuffle are mutually exclusive
+        print(f"  Sampling {max_train}/{len(train_dataset)} per epoch (RandomSampler)")
+    num_workers = data_cfg.get("num_workers", 4)
     train_loader = DataLoader(
         train_dataset,
         batch_size = train_cfg["batch_size"],
-        shuffle = True,
-        num_workers = data_cfg.get("num_workers", 4),
+        shuffle = train_shuffle,
+        sampler = train_sampler,
+        num_workers = num_workers,
         pin_memory = device.type == "cuda",
         drop_last = True,
         collate_fn = _unified_collate_fn,
+        persistent_workers = num_workers > 0,
     )
 
     # Optional validation loader (always NYUv2 for consistency)
@@ -521,9 +532,10 @@ def main():
             val_dataset,
             batch_size = train_cfg["batch_size"],
             shuffle = False,
-            num_workers = data_cfg.get("num_workers", 4),
+            num_workers = num_workers,
             pin_memory = device.type == "cuda",
             collate_fn = _unified_collate_fn,
+            persistent_workers = num_workers > 0,
         )
 
     # verbose
@@ -573,6 +585,11 @@ def main():
         using_warmup = False
         warmup_done = True
     scheduler = cosine_scheduler
+
+    # Mixed precision (AMP) — enable with --amp when GPU memory is limited
+    use_amp = args.amp
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+    print(f"\033[1mMixed precision (AMP): {use_amp}\033[0m")
 
     # Gradient accumulation
     accum_steps = args.accum_steps
@@ -689,7 +706,8 @@ def main():
             # Forward pass
             if accum_steps <= 1:
                 optimizer.zero_grad()
-            outputs, losses = model.forward(inputs, image_metas)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                outputs, losses = model.forward(inputs, image_metas)
 
             # Compute total loss
             lidar_raw_loss = None
@@ -713,11 +731,13 @@ def main():
             # Backward (with gradient accumulation)
             if accum_steps > 1:
                 total_loss = total_loss / accum_steps
-            total_loss.backward()
+            scaler.scale(total_loss).backward()
 
             if accum_steps <= 1 or (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 optimizer.zero_grad()
                 # Step warmup scheduler per optimizer step
                 if using_warmup and not warmup_done:

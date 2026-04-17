@@ -173,14 +173,27 @@ class SintelDataset(Dataset):
         else:
             self.entries = all_entries
 
+        # Lazy per-worker file handle (avoid reopening h5 every sample)
+        self._h5_cache: Optional[h5py.File] = None
+        self._h5_cache_path: Optional[Path] = None
+
         print(f"SintelDataset: {len(self.entries)} samples ({split}) from {h5_path.name}")
+
+    def _get_h5(self, h5path: Path) -> h5py.File:
+        """Return a cached per-worker h5py file handle."""
+        if self._h5_cache is None or self._h5_cache_path != h5path:
+            if self._h5_cache is not None:
+                self._h5_cache.close()
+            self._h5_cache = h5py.File(h5path, "r")
+            self._h5_cache_path = h5path
+        return self._h5_cache
 
     def __len__(self) -> int:
         return len(self.entries)
 
     def _load_image_from_h5(self, entry: Dict) -> Image.Image:
-        with h5py.File(entry["h5path"], "r") as f:
-            data = f[entry["image_key"]][()]
+        f = self._get_h5(entry["h5path"])
+        data = f[entry["image_key"]][()]
         if isinstance(data, np.ndarray) and data.dtype == np.uint8 and data.ndim == 1:
             return Image.open(io.BytesIO(data.tobytes())).convert("RGB")
         if data.ndim == 3:
@@ -192,8 +205,8 @@ class SintelDataset(Dataset):
         return Image.fromarray(data.astype(np.uint8)).convert("RGB")
 
     def _load_depth_from_h5(self, entry: Dict) -> np.ndarray:
-        with h5py.File(entry["h5path"], "r") as f:
-            data = f[entry["depth_key"]][()]
+        f = self._get_h5(entry["h5path"])
+        data = f[entry["depth_key"]][()]
         if isinstance(data, np.ndarray) and data.dtype == np.uint8 and data.ndim == 1:
             depth_img = Image.open(io.BytesIO(data.tobytes()))
             data = np.array(depth_img, dtype=np.float32)
