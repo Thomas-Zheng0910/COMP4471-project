@@ -26,7 +26,10 @@ def colorize(
     # normalize
     vmin = value.min() if vmin is None else vmin
     vmax = value.max() if vmax is None else vmax
-    value = (value - vmin) / (vmax - vmin)  # vmin..vmax
+    if vmax - vmin < 1e-8:
+        value = np.zeros_like(value)
+    else:
+        value = (value - vmin) / (vmax - vmin)  # vmin..vmax
 
     # set color
     cmapper = plt.get_cmap(cmap)
