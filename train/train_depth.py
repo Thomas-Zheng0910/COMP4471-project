@@ -876,10 +876,10 @@ def main():
                         if lidar_confidence is not None:
                             inputs["lidar_confidence"] = lidar_confidence
                     image_metas = batch["img_metas"]
-                    # model is in eval() mode: forward() dispatches to forward_test
-                    # which does NOT compute losses. We use forward_train explicitly
-                    # so we can still get loss values for monitoring.
-                    outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = True)
+                    # Validation: only need depth output for metrics.
+                    # Don't force loss computation — SelfDistill requires
+                    # flip-augmented pairs which validation doesn't have.
+                    outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = False)
                     lidar_val_weight = train_cfg.get("lidar_loss_weight", 0.0)
                     if lidar_val_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
                         lidar_val_raw, lidar_val_stats = compute_lidar_sparse_loss(
@@ -930,7 +930,8 @@ def main():
                         val_rmse_with_lidar_sum += float(rmse_with_lidar.item())
                         val_rmse_rgb_only_sum += float(rmse_rgb_only.item())
                         val_rmse_compare_steps += 1
-                    val_loss += sum(losses_val["opt"].values())
+                    if losses_val["opt"]:
+                        val_loss += sum(losses_val["opt"].values())
                     val_batches += 1
 
             avg_val_loss = val_loss / max(val_batches, 1)
