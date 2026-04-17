@@ -304,6 +304,20 @@ def log_depth_images(writer: SummaryWriter, tag: str, depth: torch.Tensor, step:
         writer.add_image(f"{tag}/{i}", colored.transpose(2, 0, 1), step)
 
 
+# ImageNet normalization constants (used to denormalize for TensorBoard display)
+_IMAGENET_MEAN = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
+_IMAGENET_STD = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
+
+
+def log_rgb_images(writer: SummaryWriter, tag: str, image: torch.Tensor, step: int, n: int = 4):
+    """Write up to *n* RGB images (ImageNet-normalized) to TensorBoard."""
+    imgs = image[:n].detach().cpu().float()
+    imgs = imgs * _IMAGENET_STD + _IMAGENET_MEAN  # denormalize
+    imgs = imgs.clamp(0, 1)
+    for i, img in enumerate(imgs):
+        writer.add_image(f"{tag}/{i}", img, step)  # [3, H, W] float 0-1
+
+
 def save_checkpoint(state: dict, path: str):
     os.makedirs(os.path.dirname(path), exist_ok = True)
     torch.save(state, path)
@@ -375,6 +389,16 @@ def compute_depth_abs_rel(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_m
     denom = torch.clamp(gt_depth[valid], min=eps)
     abs_rel = torch.abs(pred_depth[valid] - gt_depth[valid]) / denom
     return abs_rel.mean()
+
+
+def compute_delta1(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Compute delta1 (% of pixels where max(pred/gt, gt/pred) < 1.25)."""
+    valid = gt_mask.bool() & (pred_depth > eps) & (gt_depth > eps)
+    if not torch.any(valid):
+        return torch.tensor(0.0, device=pred_depth.device)
+    ratio = torch.max(pred_depth[valid] / gt_depth[valid],
+                      gt_depth[valid] / pred_depth[valid])
+    return (ratio < 1.25).float().mean()
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -776,10 +800,11 @@ def main():
                         lidar_gate_mean_sum += float(fusion_stats["lidar_gate_mean"].item())
                         lidar_fusion_steps += 1
 
-                # Log sample predicted and GT depth images
+                # Log sample predicted and GT depth images, and original RGB
                 if "depth" in outputs:
                     log_depth_images(writer, "train/pred_depth", outputs["depth"], global_step)
                 log_depth_images(writer, "train/gt_depth", depth, global_step)
+                log_rgb_images(writer, "train/input_rgb", image, global_step)
 
         # ── End-of-epoch ─────────────────────────────────────────────────
         avg_loss = epoch_loss / max(num_batches, 1)
@@ -819,6 +844,7 @@ def main():
                 val_fusion_steps = 0
                 val_rmse_sum = 0.0
                 val_abs_rel_sum = 0.0
+                val_delta1_sum = 0.0
                 val_metric_steps = 0
                 val_rmse_with_lidar_sum = 0.0
                 val_rmse_rgb_only_sum = 0.0
@@ -875,8 +901,10 @@ def main():
                     if "depth" in outputs_val:
                         rmse_val = compute_depth_rmse(outputs_val["depth"], depth, depth_mask)
                         abs_rel_val = compute_depth_abs_rel(outputs_val["depth"], depth, depth_mask)
+                        delta1_val = compute_delta1(outputs_val["depth"], depth, depth_mask)
                         val_rmse_sum += float(rmse_val.item())
                         val_abs_rel_sum += float(abs_rel_val.item())
+                        val_delta1_sum += float(delta1_val.item())
                         val_metric_steps += 1
 
                     # Phase 4: fallback check (RGB-only) during validation.
@@ -918,6 +946,11 @@ def main():
                     val_abs_rel_sum / val_metric_steps,
                     epoch + 1,
                 )
+                writer.add_scalar(
+                    "epoch/val_delta1",
+                    val_delta1_sum / val_metric_steps,
+                    epoch + 1,
+                )
             if val_lidar_steps > 0:
                 writer.add_scalar(
                     "epoch/val_lidar_valid_ratio",
@@ -949,7 +982,8 @@ def main():
             if val_metric_steps > 0:
                 avg_val_rmse = val_rmse_sum / val_metric_steps
                 avg_val_abs_rel = val_abs_rel_sum / val_metric_steps
-                print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f}\033[0m")
+                avg_val_delta1 = val_delta1_sum / val_metric_steps
+                print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f} | Val δ1: {avg_val_delta1:.4f}\033[0m")
             else:
                 print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 
