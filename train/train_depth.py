@@ -634,7 +634,19 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt.get("epoch", 0) + 1
         global_step = ckpt.get("global_step", 0)
-        print(f"\033[92mResumed at epoch {start_epoch}, step {global_step}\033[0m")
+        # Restore warmup state
+        if using_warmup and "warmup_scheduler_state_dict" in ckpt:
+            warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
+            warmup_step_count = ckpt.get("warmup_step_count", 0)
+            warmup_done = ckpt.get("warmup_done", warmup_step_count >= warmup_steps)
+        elif using_warmup and global_step >= warmup_steps:
+            # Checkpoint from before warmup state was saved — infer completion
+            warmup_done = True
+            warmup_step_count = warmup_steps
+        # Restore AMP scaler state
+        if use_amp and "scaler_state_dict" in ckpt:
+            scaler.load_state_dict(ckpt["scaler_state_dict"])
+        print(f"\033[92mResumed at epoch {start_epoch}, step {global_step}, warmup_done={warmup_done}\033[0m")
 
     # Set up TensorBoard writer
     writer = SummaryWriter(log_dir = tensorboard_dir)
@@ -998,6 +1010,10 @@ def main():
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "scheduler_state_dict": scheduler.state_dict(),
+                    "warmup_scheduler_state_dict": warmup_scheduler.state_dict() if using_warmup else None,
+                    "warmup_step_count": warmup_step_count if using_warmup else 0,
+                    "warmup_done": warmup_done,
+                    "scaler_state_dict": scaler.state_dict() if use_amp else None,
                     "config": config,
                 },
                 ckpt_path,

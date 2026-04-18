@@ -56,11 +56,11 @@ VAL_ROOT="datasets/nyu_depth_v2_labeled.mat"
 IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
 NUM_WORKERS=8
-MAX_TRAIN_SAMPLES=10000  # cap samples per epoch (0=use all; full dataset is ~49k)
+MAX_TRAIN_SAMPLES=5000  # cap samples per epoch (0=use all; full dataset is ~49k)
 DATASETS="nyuv2,sunrgbd,vkitti2,sintel"
 
 # Checkpoint Resume (leave empty for fresh start)
-RESUME=""
+RESUME="runs/train_depth_1776440192635_444800/checkpoints/epoch_10.pth"
 
 # Build Command
 CMD="python -m train.train_depth \
