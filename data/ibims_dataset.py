@@ -152,11 +152,18 @@ class IBims1Dataset(Dataset):
         if isinstance(data, np.ndarray) and data.dtype == np.uint8 and data.ndim == 1:
             depth_img = Image.open(io.BytesIO(data.tobytes()))
             data = np.array(depth_img, dtype=np.float32)
+            # uint16 PNG (mode I;16): values are in millimetres → convert to metres
+            if depth_img.mode == "I;16":
+                data = data / 1000.0
         if data.ndim == 3:
             if data.shape[0] in (1, 3, 4):
                 data = np.transpose(data, (1, 2, 0))
-            if data.shape[-1] == 3:
-                data = data[..., 2].astype(np.float32) + data[..., 1].astype(np.float32) * 255 + data[..., 0].astype(np.float32) * 255 * 255
+            if data.shape[-1] >= 3:
+                # UniDepth 24-bit little-endian: R=LSB, G=middle, B=MSB
+                R = data[..., 0].astype(np.float32)
+                G = data[..., 1].astype(np.float32)
+                B = data[..., 2].astype(np.float32)
+                data = (R + G * 256.0 + B * 65536.0) / 1000.0
             else:
                 data = data[..., 0].astype(np.float32)
         return data.astype(np.float32)

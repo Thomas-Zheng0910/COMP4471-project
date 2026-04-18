@@ -168,9 +168,14 @@ class SUNRGBDDataset(Dataset):
         image_pil = Image.open(s["rgb"]).convert("RGB")
         image_tensor = self.image_transform(image_pil)
 
-        # SUN-RGBD depth is uint16 in millimetres → metres
-        depth_raw = np.asarray(Image.open(s["depth"]), dtype=np.float32)
-        depth_m = depth_raw / 1000.0 * self.depth_scale
+        # SUN-RGBD depth_bfx is uint16 with 3-bit left-shift encoding.
+        # Decode: bitor(raw >> 3, raw << 13) then divide by 1000 → metres.
+        depth_uint16 = np.asarray(Image.open(s["depth"]), dtype=np.uint16)
+        depth_decoded = np.bitwise_or(
+            depth_uint16 >> 3,
+            (depth_uint16 << 13).astype(np.uint16),
+        ).astype(np.float32)
+        depth_m = depth_decoded / 1000.0 * self.depth_scale
         depth_tensor = self.depth_transform(depth_m)
         depth_tensor = torch.clamp(depth_tensor, MIN_DEPTH, MAX_DEPTH)
         depth_mask = (depth_tensor > MIN_DEPTH) & torch.isfinite(depth_tensor)
@@ -179,7 +184,7 @@ class SUNRGBDDataset(Dataset):
             K = torch.from_numpy(s["K"]).float()
             # Scale intrinsics to match resized image
             if self.image_shape is not None:
-                orig_h, orig_w = depth_raw.shape[:2]
+                orig_h, orig_w = depth_uint16.shape[:2]
                 sh = self.image_shape[0] / orig_h
                 sw = self.image_shape[1] / orig_w
                 K[0, :] *= sw

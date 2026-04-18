@@ -211,11 +211,16 @@ class SintelDataset(Dataset):
             depth_img = Image.open(io.BytesIO(data.tobytes()))
             data = np.array(depth_img, dtype=np.float32)
         if data.ndim == 3:
-            # Encoded depth: R*65536 + G*256 + B
             if data.shape[0] in (1, 3, 4):
                 data = np.transpose(data, (1, 2, 0))
-            if data.shape[-1] == 3:
-                data = data[..., 2].astype(np.float32) + data[..., 1].astype(np.float32) * 255 + data[..., 0].astype(np.float32) * 255 * 255
+            if data.shape[-1] >= 3:
+                # UniDepth packs depth as 24-bit little-endian integer in RGB:
+                #   R = LSB, G = middle byte, B = MSB (usually 0)
+                # Decode: depth_mm = R | (G << 8) | (B << 16), then /1000
+                R = data[..., 0].astype(np.float32)
+                G = data[..., 1].astype(np.float32)
+                B = data[..., 2].astype(np.float32)
+                data = (R + G * 256.0 + B * 65536.0) / 1000.0
             else:
                 data = data[..., 0].astype(np.float32)
         return data.astype(np.float32)

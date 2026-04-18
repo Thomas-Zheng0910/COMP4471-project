@@ -76,31 +76,31 @@ def _collect_vkitti2_pairs(root: Path) -> List[Tuple[Path, Path]]:
       2. Flat scenes:    root/Scene*/{variation}/frames/rgb/Camera_*/rgb_*.jpg
                          root/Scene*/{variation}/frames/depth/Camera_*/depth_*.png
     """
+    import glob as _glob
+
+    root_str = str(root)
+
     # Layout 1: official vkitti_2.0.3_rgb / vkitti_2.0.3_depth split
     rgb_base = root / "vkitti_2.0.3_rgb"
     depth_base = root / "vkitti_2.0.3_depth"
 
     if rgb_base.exists() and depth_base.exists():
+        rgb_files = sorted(_glob.glob(str(rgb_base) + "/**/rgb_*.jpg", recursive=True))
         pairs = []
-        for rgb_path in sorted(rgb_base.rglob("rgb_*.jpg")):
-            rel = rgb_path.relative_to(rgb_base)
-            depth_rel = Path(str(rel).replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png"))
-            depth_path = depth_base / depth_rel
-            if depth_path.exists():
-                pairs.append((rgb_path, depth_path))
+        for rp in rgb_files:
+            dp = rp.replace(str(rgb_base), str(depth_base)).replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png")
+            if os.path.isfile(dp):
+                pairs.append((Path(rp), Path(dp)))
         if pairs:
             return pairs
 
     # Layout 2: flat scenes — rgb and depth are siblings under frames/
+    rgb_files = sorted(_glob.glob(root_str + "/**/rgb_*.jpg", recursive=True))
     pairs = []
-    for rgb_path in sorted(root.rglob("rgb_*.jpg")):
-        # .../Scene01/clone/frames/rgb/Camera_0/rgb_00000.jpg
-        # → .../Scene01/clone/frames/depth/Camera_0/depth_00000.png
-        rel = rgb_path.relative_to(root)
-        depth_rel = Path(str(rel).replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png"))
-        depth_path = root / depth_rel
-        if depth_path.exists():
-            pairs.append((rgb_path, depth_path))
+    for rp in rgb_files:
+        dp = rp.replace("/rgb/", "/depth/").replace("rgb_", "depth_").replace(".jpg", ".png")
+        if os.path.isfile(dp):
+            pairs.append((Path(rp), Path(dp)))
 
     if not pairs:
         raise RuntimeError(f"No Virtual KITTI 2 pairs found under {root}")
