@@ -188,160 +188,40 @@ Six experiments systematically evaluate each component:
 
 ## Running the Experiments
 
-### Prerequisites
-
-```bash
-# Activate environment
-conda activate DepthSense
-
-# Fix libc++ issue (if on the HKUST cluster)
-export LD_LIBRARY_PATH=/localdata/chzheng/miniconda3/envs/DepthSense/lib:$LD_LIBRARY_PATH
-
-# Set cache directories
-export TORCH_HOME=./cache
-export HF_HOME=./cache
-
-# Python binary (adjust if different)
-PYTHON=/localdata/chzheng/miniconda3/envs/DepthSense/bin/python
-```
-
-### Launch All Experiments at Once
-
-The ablation script assigns one experiment per GPU and launches them in parallel:
-
-```bash
-# Launch all 6 experiments on GPUs 0-5 (one per GPU):
-bash run_script/run_transparent_ablation.sh "0,1,2,3,4,5" 20
-
-# If only 2 GPUs are free, experiments run in round-robin (2 at a time):
-bash run_script/run_transparent_ablation.sh "2,3" 20
-
-# Monitor progress:
-tail -f runs/E*_*.log
-```
+Each experiment has its own launch script under `run_script/`. Pass the GPU index as the first argument (defaults to `0`).
 
 ### Launch Individual Experiments
 
-All experiments share these common flags. Set `GPU` to a free GPU index:
+| Script | Experiment | What it adds |
+|--------|------------|--------------|
+| `bash run_script/run_E1_baseline.sh <GPU>` | E1 — Baseline | Nothing (reference) |
+| `bash run_script/run_E2_edge_head.sh <GPU>` | E2 — +Edge Head | Low-level channel: EdgeHead + EdgeBCE loss |
+| `bash run_script/run_E3_seg_aux.sh <GPU>` | E3 — +Seg Auxiliary | High-level channel: SegHead + SegCE loss |
+| `bash run_script/run_E4_dual_channel.sh <GPU>` | E4 — Dual-Channel | Both EdgeHead + SegHead |
+| `bash run_script/run_E5_dual_boundary.sh <GPU>` | E5 — +Boundary | E4 + TransparencyBoundaryLoss |
+| `bash run_script/run_E6_full_plus_extras.sh <GPU>` | E6 — Full | E5 + grad_matching + edge_ssi |
+
+Example — run E4 on GPU 2:
 
 ```bash
-GPU=0  # <-- change to your free GPU
-
-COMMON="\
-  --seed 42 --epochs 20 --batch_size 2 --accum_steps 8 \
-  --lr 1e-4 --encoder_lr 1e-5 --layer_decay 0.9 --lr_min 1e-6 \
-  --weight_decay 0.01 --clip_value 1.0 --warmup_steps 500 \
-  --freeze_encoder_epochs 3 --log_every 50 --save_every 5 \
-  --encoder_name dinov3_vitl16 \
-  --pretrained ./model/backbones/metadinov3/dinov3-weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth \
-  --output_idx 5 12 18 24 --use_checkpoint true \
-  --hidden_dim 512 --dropout 0.0 --depths 3 2 1 \
-  --num_heads 8 --expansion 4 \
-  --depth_loss_name SILog --depth_loss_weight 10.0 \
-  --camera_loss_name Regression --camera_loss_weight 0.1 \
-  --invariance_loss_name SelfDistill --invariance_loss_weight 0.01 \
-  --image_shape 384 384 --depth_scale 1.0 --num_workers 4 \
-  --val_root datasets/nyu_depth_v2_labeled.mat \
-  --datasets nyuv2,tom --color_jitter 0.3 --deep_supervision true --amp"
+bash run_script/run_E4_dual_channel.sh 2
 ```
 
-#### E1 — Baseline
+### Launch All at Once
 
-Reference experiment with scale-invariant training on NYUv2+ToM, color jitter, and deep supervision. No auxiliary heads.
+The batch script assigns one experiment per GPU in parallel:
 
 ```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E1_baseline \
-  $COMMON \
-  > runs/E1_baseline.log 2>&1 &
+bash run_script/run_transparent_ablation.sh "0,1,2,3,4,5" 20
 ```
 
-#### E2 — +Edge Head (Low-Level Channel Only)
-
-Adds the EdgeHead at 1/2 scale with gated residual refinement. Tests whether learned edge detection alone improves boundary depth.
+### Monitoring
 
 ```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E2_edge_head \
-  $COMMON \
-  --use_edge_head true \
-  --edge_loss_weight 0.5 \
-  > runs/E2_edge_head.log 2>&1 &
-```
-
-#### E3 — +Seg Auxiliary (High-Level Channel Only)
-
-Adds the SegHead at 1/16 scale with cross-attention fusion. Tests whether semantic class awareness alone helps transparent surface depth.
-
-```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E3_seg_aux \
-  $COMMON \
-  --use_seg_auxiliary true \
-  --seg_loss_weight 0.5 \
-  --seg_labels_path datasets/nyuv2_yolo_seg_labels.npy \
-  > runs/E3_seg_aux.log 2>&1 &
-```
-
-#### E4 — Dual-Channel (Edge + Seg Together)
-
-Combines both channels: EdgeHead for low-level boundary features and SegHead for high-level semantic features. Tests whether the two channels complement each other.
-
-```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E4_dual_channel \
-  $COMMON \
-  --use_edge_head true \
-  --edge_loss_weight 0.5 \
-  --use_seg_auxiliary true \
-  --seg_loss_weight 0.5 \
-  --seg_labels_path datasets/nyuv2_yolo_seg_labels.npy \
-  > runs/E4_dual_channel.log 2>&1 &
-```
-
-#### E5 — Dual-Channel + Boundary Loss
-
-Adds the TransparencyBoundaryLoss on top of E4. This loss penalizes depth gradient errors specifically in the dilated contour zone around segmented objects, encouraging sharp transitions at transparent surface edges.
-
-```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E5_dual_boundary \
-  $COMMON \
-  --use_edge_head true \
-  --edge_loss_weight 0.5 \
-  --use_seg_auxiliary true \
-  --seg_loss_weight 0.5 \
-  --seg_labels_path datasets/nyuv2_yolo_seg_labels.npy \
-  --boundary_loss_weight 0.5 \
-  > runs/E5_dual_boundary.log 2>&1 &
-```
-
-#### E6 — Full (All Losses)
-
-Kitchen sink: adds gradient matching (from DepthAnythingV2/MiDaS) and edge-guided local SSI (from UniDepthV2) on top of E5. Tests whether additional established losses provide further gains.
-
-```bash
-CUDA_VISIBLE_DEVICES=$GPU $PYTHON -m train.train_depth \
-  --cuda 0 --run_name E6_full_plus_extras \
-  $COMMON \
-  --use_edge_head true \
-  --edge_loss_weight 0.5 \
-  --use_seg_auxiliary true \
-  --seg_loss_weight 0.5 \
-  --seg_labels_path datasets/nyuv2_yolo_seg_labels.npy \
-  --boundary_loss_weight 0.5 \
-  --grad_matching_weight 1.0 \
-  --edge_guided_ssi_weight 0.5 \
-  > runs/E6_full_plus_extras.log 2>&1 &
-```
-
-### Monitoring and Checking Results
-
-```bash
-# Watch a specific experiment's loss curve:
+# Watch a specific experiment:
 tail -f runs/E4_dual_channel.log
 
-# Check GPU memory usage:
+# Check GPU usage:
 nvidia-smi
 
 # Compare results after training:
