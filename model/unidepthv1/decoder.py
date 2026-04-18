@@ -108,6 +108,60 @@ class CameraHead(nn.Module):
         self.shapes = shapes
 
 
+class SegHead(nn.Module):
+    """High-level channel: semantic segmentation head on 1/16-scale latents (color/object features)."""
+
+    def __init__(self, hidden_dim: int, num_classes: int, dropout: float = 0.0):
+        super().__init__()
+        self.head = nn.Sequential(
+            nn.Conv2d(hidden_dim, hidden_dim // 2, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(hidden_dim // 2, num_classes, kernel_size=1),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """x: [B, hidden_dim, H/16, W/16] -> [B, num_classes, H/16, W/16]"""
+        return self.head(x)
+
+
+class EdgeHead(nn.Module):
+    """Low-level channel: edge/boundary head on 1/2-scale latents (structural features).
+
+    Predicts a 1-channel edge probability map, then feeds the edge signal back
+    into the depth branch via a lightweight gated refinement.
+    """
+
+    def __init__(self, feature_dim: int, dropout: float = 0.0):
+        super().__init__()
+        # feature_dim = hidden_dim // 8 (the channel dim at 1/2 scale)
+        self.edge_conv = nn.Sequential(
+            nn.Conv2d(feature_dim, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Dropout2d(dropout),
+            nn.Conv2d(feature_dim, 1, kernel_size=1),
+        )
+        # Edge-conditioned depth refinement: concat(depth_feat, edge_feat) -> gated residual
+        self.edge_to_feat = nn.Sequential(
+            nn.Conv2d(1, feature_dim, kernel_size=3, padding=1),
+            nn.GELU(),
+        )
+        self.refine_gate = nn.Sequential(
+            nn.Conv2d(feature_dim * 2, feature_dim, kernel_size=1),
+            nn.GELU(),
+            nn.Conv2d(feature_dim, feature_dim, kernel_size=1),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, latents_2_spatial: torch.Tensor):
+        """latents_2_spatial: [B, C, H/2, W/2] -> edge_logits, refined_features"""
+        edge_logits = self.edge_conv(latents_2_spatial)  # [B, 1, H/2, W/2]
+        edge_feat = self.edge_to_feat(edge_logits.sigmoid())  # [B, C, H/2, W/2]
+        gate = self.refine_gate(torch.cat([latents_2_spatial, edge_feat], dim=1))
+        refined = latents_2_spatial + gate * edge_feat
+        return edge_logits, refined
+
+
 class DepthHead(nn.Module):
     def __init__(
         self,
@@ -121,12 +175,16 @@ class DepthHead(nn.Module):
         layer_scale: float = 1.0,
         use_lidar_fusion: bool = False,
         lidar_fusion_type: str = "late",  # "late" or "token"
+        use_seg_auxiliary: bool = False,
+        num_seg_classes: int = 81,
+        use_edge_head: bool = False,
         **kwargs,
     ) -> None:
         super().__init__()
         if isinstance(depths, int):
             depths = [depths] * 3
         assert len(depths) == 3
+        self.use_edge_head = use_edge_head
 
         self.project_rays16 = MLP(
             camera_dim, expansion=expansion, dropout=dropout, output_dim=hidden_dim
@@ -259,6 +317,29 @@ class DepthHead(nn.Module):
                     nn.Linear(hidden_dim // 4, hidden_dim // 4),
                     nn.Sigmoid(),
                 )
+        # Segmentation auxiliary modules (MuMu-style)
+        self.use_seg_auxiliary = use_seg_auxiliary
+        if self.use_seg_auxiliary:
+            self.seg_head = SegHead(hidden_dim, num_seg_classes, dropout=dropout)
+            self.seg_to_query = nn.Sequential(
+                nn.Conv2d(num_seg_classes, hidden_dim, kernel_size=1),
+                nn.GELU(),
+            )
+            self.seg_cross_attn = AttentionBlock(
+                hidden_dim,
+                num_heads=1,
+                expansion=expansion,
+                dropout=dropout,
+                layer_scale=layer_scale,
+                context_dim=hidden_dim,
+            )
+            self.seg_gate = nn.Sequential(
+                nn.LayerNorm(hidden_dim * 2),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Sigmoid(),
+            )
         for i, (blk_lst, depth) in enumerate(
             zip([self.layers_16, self.layers_8, self.layers_4], depths)
         ):
@@ -277,6 +358,10 @@ class DepthHead(nn.Module):
         self.out2 = nn.Conv2d(hidden_dim // 8, 1, 3, padding=1)
         self.out4 = nn.Conv2d(hidden_dim // 4, 1, 3, padding=1)
         self.out8 = nn.Conv2d(hidden_dim // 2, 1, 3, padding=1)
+
+        # Low-level edge head on 1/2-scale features
+        if self.use_edge_head:
+            self.edge_head = EdgeHead(hidden_dim // 8, dropout=dropout)
 
     def set_original_shapes(self, shapes: Tuple[int, int]):
         self.original_shapes = shapes
@@ -401,7 +486,20 @@ class DepthHead(nn.Module):
             lidar_gate_16 = self.lidar_gate_16(torch.cat([latents_16, lidar_fusion_16], dim=-1))
             latents_16 = latents_16 + lidar_gate_16 * (lidar_fusion_16 - latents_16)
             fusion_stats["lidar_gate_mean"] = lidar_gate_16.mean().detach()
-        
+
+        # === High-level channel: Segmentation auxiliary fusion (MuMu-style cross-attention) ===
+        seg_logits = None
+        if self.use_seg_auxiliary:
+            latents_16_spatial = rearrange(
+                latents_16, "b (h w) c -> b c h w", h=shapes[0], w=shapes[1]
+            ).contiguous()
+            seg_logits = self.seg_head(latents_16_spatial)
+            seg_query_spatial = self.seg_to_query(seg_logits)
+            seg_query = rearrange(seg_query_spatial, "b c h w -> b (h w) c")
+            seg_fused = self.seg_cross_attn(seg_query, context=latents_16)
+            gate = self.seg_gate(torch.cat([latents_16, seg_fused], dim=-1))
+            latents_16 = latents_16 + gate * (seg_fused - latents_16)
+
         latents_8 = self.up8(
             rearrange(
                 latents_16 + rays_embedding_16,
@@ -472,11 +570,16 @@ class DepthHead(nn.Module):
                 w=shapes[1] * 4,
             ).contiguous()
         )
-        out2 = self.out2(
-            rearrange(
-                latents_2, "b (h w) c -> b c h w", h=shapes[0] * 8, w=shapes[1] * 8
-            )
+        latents_2_spatial = rearrange(
+            latents_2, "b (h w) c -> b c h w", h=shapes[0] * 8, w=shapes[1] * 8
         )
+
+        # === Low-level channel: Edge head on 1/2-scale features ===
+        edge_logits = None
+        if self.use_edge_head:
+            edge_logits, latents_2_spatial = self.edge_head(latents_2_spatial)
+
+        out2 = self.out2(latents_2_spatial)
 
         # Depth features
         proj_latents_16 = rearrange(
@@ -488,7 +591,7 @@ class DepthHead(nn.Module):
         out4 = out4.clamp(-10.0, 10.0).exp()
         out8 = out8.clamp(-10.0, 10.0).exp()
 
-        return out8, out4, out2, proj_latents_16, fusion_stats
+        return out8, out4, out2, proj_latents_16, fusion_stats, seg_logits, edge_logits
 
 
 class Decoder(nn.Module):
@@ -644,7 +747,7 @@ class Decoder(nn.Module):
         # run bulk of the model
         self.depth_layer.set_shapes(common_shape)
         self.depth_layer.set_original_shapes((H, W))
-        out8, out4, out2, depth_features, fusion_stats = self.depth_layer(
+        out8, out4, out2, depth_features, fusion_stats, seg_logits, edge_logits = self.depth_layer(
             features=features,
             rays_hr=rays,
             pos_embed=pos_embed,
@@ -654,7 +757,7 @@ class Decoder(nn.Module):
             lidar_confidence=inputs.get("lidar_confidence", None),
         )
 
-        return intrinsics, [out8, out4, out2], depth_features, fusion_stats
+        return intrinsics, [out8, out4, out2], depth_features, fusion_stats, seg_logits, edge_logits
 
     @torch.jit.ignore
     def no_weight_decay_keywords(self):
@@ -714,6 +817,9 @@ class Decoder(nn.Module):
             layer_scale=layer_scale,
             use_lidar_fusion=config["model"]["pixel_decoder"].get("use_lidar_fusion", False),
             lidar_fusion_type=config["model"]["pixel_decoder"].get("lidar_fusion_type", "late"),
+            use_seg_auxiliary=config["model"]["pixel_decoder"].get("use_seg_auxiliary", False),
+            num_seg_classes=config["model"]["pixel_decoder"].get("num_seg_classes", 81),
+            use_edge_head=config["model"]["pixel_decoder"].get("use_edge_head", False),
         )
 
         # transformer part

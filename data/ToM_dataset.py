@@ -247,7 +247,7 @@ class ToMDataset(Dataset):
             "depth": depth_tensor,
             "depth_mask": depth_mask,
             "flip": flip,
-            "si": False,
+            "si": True,
         }
 
         # Optionally include intrinsics

@@ -159,7 +159,7 @@ class VirtualKITTI2Dataset(Dataset):
             mask_t = torch.flip(mask_t, dims=[-1])
 
         sample = {"image": image_t, "depth": depth_t, "depth_mask": mask_t,
-                  "flip": flip, "si": False}
+                  "flip": flip, "si": True}
         if self.return_intrinsics:
             K_out = K.clone()
             if flip:

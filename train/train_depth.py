@@ -88,6 +88,37 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--invariance_loss_name', type=str, default='SelfDistill')
     parser.add_argument('--invariance_loss_weight', type=float, default=0.1)
     parser.add_argument('--lidar_loss_weight', type=float, default=0.5)
+    # Improvement: Gradient Matching Loss (DAV2/MiDaS)
+    parser.add_argument('--grad_matching_weight', type=float, default=0.0,
+                        help='Weight for gradient matching loss (0=disabled, recommended: 0.5-2.0)')
+    parser.add_argument('--grad_matching_scales', type=int, default=4,
+                        help='Number of multi-scale levels for gradient matching')
+    # Improvement: EdgeGuidedLocalSSI Loss (UniDepthV2)
+    parser.add_argument('--edge_guided_ssi_weight', type=float, default=0.0,
+                        help='Weight for edge-guided local SSI loss (0=disabled, recommended: 0.5-1.0)')
+    # Improvement: Color Jitter Augmentation
+    parser.add_argument('--color_jitter', type=float, default=0.0,
+                        help='Color jitter strength (0=disabled, recommended: 0.2-0.4)')
+    # Improvement: Multi-Scale Deep Supervision
+    parser.add_argument('--deep_supervision', type=lambda x: x.lower() == 'true', default=False,
+                        help='Apply depth loss at all decoder scales (out8, out4, out2)')
+    # Dual-channel: Segmentation auxiliary (high-level features)
+    parser.add_argument('--use_seg_auxiliary', type=lambda x: x.lower() == 'true', default=False,
+                        help='Enable auxiliary segmentation head (high-level channel)')
+    parser.add_argument('--num_seg_classes', type=int, default=81,
+                        help='Number of segmentation classes (81 for COCO including background)')
+    parser.add_argument('--seg_loss_weight', type=float, default=0.5,
+                        help='Weight for segmentation cross-entropy loss')
+    parser.add_argument('--seg_labels_path', type=str, default=None,
+                        help='Path to YOLO seg labels .npy file for NYUv2')
+    # Dual-channel: Edge head (low-level features)
+    parser.add_argument('--use_edge_head', type=lambda x: x.lower() == 'true', default=False,
+                        help='Enable edge prediction head (low-level channel)')
+    parser.add_argument('--edge_loss_weight', type=float, default=0.5,
+                        help='Weight for edge BCE loss')
+    # Transparency boundary loss (gradient matching at object boundaries)
+    parser.add_argument('--boundary_loss_weight', type=float, default=0.0,
+                        help='Weight for transparency boundary loss (0=disabled, recommended: 0.5-1.0)')
 
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
@@ -145,6 +176,9 @@ def build_config(args: argparse.Namespace) -> dict:
                 "depths": args.depths,
                 "use_lidar_fusion": args.use_lidar_fusion,
                 "lidar_fusion_type": args.lidar_fusion_type,
+                "use_seg_auxiliary": args.use_seg_auxiliary,
+                "num_seg_classes": args.num_seg_classes,
+                "use_edge_head": args.use_edge_head,
             },
             "num_heads": args.num_heads,
             "expansion": args.expansion,
@@ -183,6 +217,35 @@ def build_config(args: argparse.Namespace) -> dict:
                     "weight": args.invariance_loss_weight,
                     "output_fn": "sqrt",
                 },
+                **({"grad_matching": {
+                    "name": "GradientMatching",
+                    "weight": args.grad_matching_weight,
+                    "scales": args.grad_matching_scales,
+                    "input_fn": "log",
+                    "output_fn": "sqrt",
+                }} if args.grad_matching_weight > 0 else {}),
+                **({"edge_guided_ssi": {
+                    "name": "EdgeGuidedLocalSSI",
+                    "weight": args.edge_guided_ssi_weight,
+                    "output_fn": "sqrt",
+                    "input_fn": "log",
+                    "use_global": True,
+                    "min_samples": 6,
+                }} if args.edge_guided_ssi_weight > 0 else {}),
+                **({"segmentation": {
+                    "name": "SegCrossEntropy",
+                    "weight": args.seg_loss_weight,
+                    "num_classes": args.num_seg_classes,
+                }} if args.use_seg_auxiliary else {}),
+                **({"edge": {
+                    "name": "EdgeBCE",
+                    "weight": args.edge_loss_weight,
+                }} if args.use_edge_head else {}),
+                **({"boundary": {
+                    "name": "TransparencyBoundaryLoss",
+                    "weight": args.boundary_loss_weight,
+                    "dilation": 8,
+                }} if args.boundary_loss_weight > 0 else {}),
             },
         },
         "data": {
@@ -203,6 +266,10 @@ def build_config(args: argparse.Namespace) -> dict:
             "max_val_samples": args.max_val_samples,
             "lidar_dropout_prob": args.lidar_dropout_prob,
             "phase4_eval_fallback": args.phase4_eval_fallback,
+            "color_jitter": args.color_jitter,
+            "deep_supervision": args.deep_supervision,
+            "use_seg_auxiliary": args.use_seg_auxiliary,
+            "seg_labels_path": args.seg_labels_path,
         },
     }
 
@@ -213,6 +280,7 @@ def build_config(args: argparse.Namespace) -> dict:
 
 DATASET_DEFAULT_ROOTS = {
     "nyuv2": "datasets/nyu_depth_v2_labeled.mat",
+    "tom": "datasets/Diffusion4RobustDepth/ToM",
     "sunrgbd": "datasets/SUNRGBD",
     "vkitti2": "datasets/virtual_kitti_2",
     "sintel": "datasets/unidepth_data",
@@ -257,6 +325,17 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
             lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
             lidar_h5_key=data_cfg.get("lidar_h5_key"),
             lidar_confidence_h5_key=data_cfg.get("lidar_confidence_h5_key"),
+            flip_aug=flip_aug,
+            use_seg_auxiliary=data_cfg.get("use_seg_auxiliary", False),
+            seg_labels_path=data_cfg.get("seg_labels_path"),
+        )
+    elif name == "tom":
+        from data.ToM_dataset import ToMDataset
+        return ToMDataset(
+            root=root,
+            split=split,
+            image_shape=image_shape,
+            depth_scale=depth_scale,
             flip_aug=flip_aug,
         )
     elif name == "sunrgbd":
@@ -462,6 +541,9 @@ def main():
     # Set up model
     model = UniDepthV1(config)
     model.to(device)
+    # Enable deep supervision if configured
+    if config["data"].get("deep_supervision", False):
+        model._deep_supervision = True
 
     # Set up Datasets & DataLoaders
     print("\n>>> Setting up datasets and dataloaders >>>")
@@ -656,6 +738,19 @@ def main():
     log_every = train_cfg.get("log_every", 50)
     save_every = train_cfg.get("save_every", 1)
 
+    # Color jitter augmentation (Proposal 3)
+    cj_strength = float(data_cfg.get("color_jitter", 0.0))
+    color_jitter_transform = None
+    if cj_strength > 0:
+        from torchvision.transforms import ColorJitter
+        color_jitter_transform = ColorJitter(
+            brightness=cj_strength,
+            contrast=cj_strength,
+            saturation=cj_strength,
+            hue=min(cj_strength * 0.5, 0.1),
+        )
+        print(f"\033[94m[AUG] Color jitter enabled: strength={cj_strength}\033[0m")
+
     # ############# #
     # Training loop #
     # ############# #
@@ -698,6 +793,15 @@ def main():
             depth_mask = batch['data']["depth_mask"].to(device)  # [2B, 1, H, W]
             K = batch['data']["K"].to(device)                    # [2B, 3, 3]
 
+            # Color jitter augmentation (Proposal 3): denormalize → jitter → renormalize
+            if color_jitter_transform is not None:
+                _imn_mean = _IMAGENET_MEAN.to(device)
+                _imn_std = _IMAGENET_STD.to(device)
+                image = image * _imn_std + _imn_mean  # denormalize to [0, 1]
+                image = image.clamp(0, 1)
+                image = color_jitter_transform(image)
+                image = (image - _imn_mean) / _imn_std  # renormalize
+
             lidar_depth = batch['data'].get("lidar_depth", None)
             lidar_mask = batch['data'].get("lidar_mask", None)
             lidar_confidence = batch['data'].get("lidar_confidence", None)
@@ -735,6 +839,11 @@ def main():
                 inputs["lidar_mask"] = lidar_mask
                 if lidar_confidence is not None:
                     inputs["lidar_confidence"] = lidar_confidence
+
+            # Seg labels for auxiliary segmentation head
+            seg_labels = batch['data'].get("seg_labels", None)
+            if seg_labels is not None:
+                inputs["seg_labels"] = seg_labels.to(device)
 
             # image_metas carry the flip / si flags set per-sample by the dataset
             image_metas = batch['img_metas']
@@ -858,6 +967,10 @@ def main():
                 val_abs_rel_sum = 0.0
                 val_delta1_sum = 0.0
                 val_metric_steps = 0
+                # Median-scaled metrics (scale-invariant evaluation)
+                val_abs_rel_si_sum = 0.0
+                val_delta1_si_sum = 0.0
+                val_rmse_si_sum = 0.0
                 val_rmse_with_lidar_sum = 0.0
                 val_rmse_rgb_only_sum = 0.0
                 val_rmse_compare_steps = 0
@@ -887,6 +1000,9 @@ def main():
                         inputs["lidar_mask"] = lidar_mask
                         if lidar_confidence is not None:
                             inputs["lidar_confidence"] = lidar_confidence
+                    seg_labels_val = batch["data"].get("seg_labels", None)
+                    if seg_labels_val is not None:
+                        inputs["seg_labels"] = seg_labels_val.to(device)
                     image_metas = batch["img_metas"]
                     # Validation: only need depth output for metrics.
                     # Don't force loss computation — SelfDistill requires
@@ -917,6 +1033,16 @@ def main():
                         val_rmse_sum += float(rmse_val.item())
                         val_abs_rel_sum += float(abs_rel_val.item())
                         val_delta1_sum += float(delta1_val.item())
+                        # Median-scaled (scale-invariant) metrics
+                        pred_d = outputs_val["depth"]
+                        mask_bool = depth_mask.bool()
+                        if mask_bool.any():
+                            med_gt = depth[mask_bool].median()
+                            med_pred = pred_d[mask_bool].median().clamp(min=1e-8)
+                            scaled_pred = pred_d * (med_gt / med_pred)
+                            val_abs_rel_si_sum += float(compute_depth_abs_rel(scaled_pred, depth, depth_mask).item())
+                            val_delta1_si_sum += float(compute_delta1(scaled_pred, depth, depth_mask).item())
+                            val_rmse_si_sum += float(compute_depth_rmse(scaled_pred, depth, depth_mask).item())
                         val_metric_steps += 1
 
                     # Phase 4: fallback check (RGB-only) during validation.
@@ -964,6 +1090,22 @@ def main():
                     val_delta1_sum / val_metric_steps,
                     epoch + 1,
                 )
+                # Median-scaled (scale-invariant) metrics
+                writer.add_scalar(
+                    "epoch/val_abs_rel_si",
+                    val_abs_rel_si_sum / val_metric_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_delta1_si",
+                    val_delta1_si_sum / val_metric_steps,
+                    epoch + 1,
+                )
+                writer.add_scalar(
+                    "epoch/val_rmse_si",
+                    val_rmse_si_sum / val_metric_steps,
+                    epoch + 1,
+                )
             if val_lidar_steps > 0:
                 writer.add_scalar(
                     "epoch/val_lidar_valid_ratio",
@@ -996,7 +1138,11 @@ def main():
                 avg_val_rmse = val_rmse_sum / val_metric_steps
                 avg_val_abs_rel = val_abs_rel_sum / val_metric_steps
                 avg_val_delta1 = val_delta1_sum / val_metric_steps
+                avg_val_abs_rel_si = val_abs_rel_si_sum / val_metric_steps
+                avg_val_delta1_si = val_delta1_si_sum / val_metric_steps
+                avg_val_rmse_si = val_rmse_si_sum / val_metric_steps
                 print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f} | Val δ1: {avg_val_delta1:.4f}\033[0m")
+                print(f"\033[1m  [median-scaled] RMSE: {avg_val_rmse_si:.4f} | AbsRel: {avg_val_abs_rel_si:.4f} | δ1: {avg_val_delta1_si:.4f}\033[0m")
             else:
                 print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
 

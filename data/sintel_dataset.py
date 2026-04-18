@@ -231,7 +231,7 @@ class SintelDataset(Dataset):
             depth_t = torch.flip(depth_t, dims=[-1])
             mask_t = torch.flip(mask_t, dims=[-1])
         sample = {"image": image_t, "depth": depth_t, "depth_mask": mask_t,
-                  "flip": flip, "si": False}
+                  "flip": flip, "si": True}
         if self.return_intrinsics:
             K_out = K.clone()
             if flip:

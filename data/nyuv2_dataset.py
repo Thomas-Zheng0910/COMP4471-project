@@ -17,6 +17,7 @@ from typing import Callable, Optional, Tuple, List, Dict
 import h5py
 import numpy as np
 import torch
+import torch.nn.functional as F
 from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
@@ -189,6 +190,8 @@ class NYUv2Dataset(Dataset):
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
         return_intrinsics: bool = True,
+        use_seg_auxiliary: bool = False,
+        seg_labels_path: Optional[str] = None,
     ) -> None:
         super().__init__()
 
@@ -254,6 +257,15 @@ class NYUv2Dataset(Dataset):
                     f"LiDAR confidence HDF5 key '{self.lidar_confidence_h5_key}' not found in {self.mat_path}."
                 )
         h5.close()
+
+        # Seg auxiliary labels (pre-computed YOLO pseudo-labels)
+        self.use_seg_auxiliary = use_seg_auxiliary
+        self._seg_labels = None
+        if self.use_seg_auxiliary and seg_labels_path is not None:
+            self._seg_labels = np.load(seg_labels_path)  # (1449, 480, 640) int16
+            assert self._seg_labels.shape[0] == total, (
+                f"Seg labels length {self._seg_labels.shape[0]} != dataset length {total}"
+            )
 
         if split_indices_file is not None:
             self.indices = self._load_indices_from_file(split_indices_file, total)
@@ -457,6 +469,7 @@ class NYUv2Dataset(Dataset):
         lidar_mask_tensor: Optional[torch.Tensor],
         lidar_confidence_tensor: Optional[torch.Tensor],
         flip: bool,
+        seg_label_tensor: Optional[torch.Tensor] = None,
     ) -> Dict:
         
         """
@@ -473,13 +486,15 @@ class NYUv2Dataset(Dataset):
                 lidar_mask_tensor = torch.flip(lidar_mask_tensor, dims = [-1])
             if lidar_confidence_tensor is not None:
                 lidar_confidence_tensor = torch.flip(lidar_confidence_tensor, dims = [-1])
+            if seg_label_tensor is not None:
+                seg_label_tensor = torch.flip(seg_label_tensor, dims = [-1])
 
         sample: Dict = {
             "image":      image_tensor,  # [3, H, W] float32
             "depth":      depth_tensor,  # [1, H, W] float32
             "depth_mask": depth_mask,    # [1, H, W] bool
             "flip":       flip,          # bool – consumed by collate_fn → img_metas
-            "si":         False,         # scale-invariant flag (always False for NYUv2)
+            "si":         True,          # scale-invariant training
             "has_lidar":  lidar_depth_tensor is not None,
         }
 
@@ -488,6 +503,9 @@ class NYUv2Dataset(Dataset):
             sample["lidar_mask"] = lidar_mask_tensor
             if lidar_confidence_tensor is not None:
                 sample["lidar_confidence"] = lidar_confidence_tensor
+
+        if seg_label_tensor is not None:
+            sample["seg_labels"] = seg_label_tensor
 
         if self.return_intrinsics:
             K = NYUV2_INTRINSICS.clone()  # [3, 3] float32
@@ -578,10 +596,20 @@ class NYUv2Dataset(Dataset):
             & (depth_tensor <= MAX_DEPTH)
         )
 
+        # Seg auxiliary label
+        seg_label_tensor = None
+        if self._seg_labels is not None:
+            seg_np = self._seg_labels[mat_idx]  # (480, 640) int16
+            seg_label_tensor = torch.from_numpy(seg_np.astype(np.int64)).unsqueeze(0)  # [1, H, W]
+            # Resize to match image_shape if needed
+            if self.image_shape != (480, 640):
+                seg_label_tensor = F.interpolate(
+                    seg_label_tensor.unsqueeze(0).float(),
+                    size=self.image_shape,
+                    mode="nearest",
+                ).squeeze(0).long()
+
         if self.flip_aug:
-            # Return (original, horizontally-flipped) pair so the collate_fn
-            # can interleave them into [orig0, flip0, orig1, flip1, ...] batches
-            # required by the SelfDistill invariance loss.
             original = self._make_sample(
                 image_tensor,
                 depth_tensor,
@@ -590,6 +618,7 @@ class NYUv2Dataset(Dataset):
                 lidar_mask_tensor,
                 lidar_confidence_tensor,
                 flip = False,
+                seg_label_tensor = seg_label_tensor,
             )
             flipped  = self._make_sample(
                 image_tensor,
@@ -599,6 +628,7 @@ class NYUv2Dataset(Dataset):
                 lidar_mask_tensor,
                 lidar_confidence_tensor,
                 flip = True,
+                seg_label_tensor = seg_label_tensor,
             )
             return original, flipped
         else:
@@ -610,6 +640,7 @@ class NYUv2Dataset(Dataset):
                 lidar_mask_tensor,
                 lidar_confidence_tensor,
                 flip = False,
+                seg_label_tensor = seg_label_tensor,
             )
 
     def __repr__(self) -> str:

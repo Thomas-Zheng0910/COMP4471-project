@@ -194,7 +194,9 @@ class UniDepthV1(
         inputs["cls_tokens"] = cls_tokens
 
         # Decode
-        pred_intrinsics, predictions, depth_features, fusion_stats = self.pixel_decoder.forward(inputs, {})
+        pred_intrinsics, predictions, depth_features, fusion_stats, seg_logits, edge_logits = self.pixel_decoder.forward(inputs, {})
+        # Store raw multi-scale predictions for deep supervision before averaging
+        raw_multiscale = predictions  # [out8, out4, out2] at 1/8, 1/4, 1/2 resolution
         predictions = sum(
             [
                 F.interpolate(
@@ -228,7 +230,14 @@ class UniDepthV1(
             "depth": predictions[:, -1:],
             "cond_features": depth_features,
             "fusion_stats": fusion_stats,
+            "seg_logits": seg_logits,
+            "edge_logits": edge_logits,
         }
+        # Deep supervision: pass intermediate scale predictions (out8, out4)
+        if self.training and getattr(self, '_deep_supervision', False):
+            outputs["depth_predictions_multiscale"] = [
+                p[:, -1:] for p in raw_multiscale[:-1]  # out8, out4 (exclude out2 which is main)
+            ]
         self.pixel_decoder.test_fixed_camera = False
         outputs["rays"] = rearrange(outputs["rays"], "b (h w) c -> b c h w", h=H, w=W)
         if "rays" in inputs:
@@ -279,6 +288,88 @@ class UniDepthV1(
         )
         losses["opt"][loss.name] = loss.weight * invariance_losses.mean()
         losses_to_be_computed.remove("invariance")
+
+        # segmentation auxiliary loss (high-level channel)
+        if "segmentation" in losses_to_be_computed:
+            loss = self.losses["segmentation"]
+            seg_logits = outputs.get("seg_logits", None)
+            seg_labels = inputs.get("seg_labels", None)
+            if seg_logits is not None and seg_labels is not None:
+                seg_losses = loss(seg_logits, target=seg_labels)
+                losses["opt"][loss.name] = loss.weight * seg_losses.mean()
+            losses_to_be_computed.remove("segmentation")
+
+        # edge head loss (low-level channel)
+        if "edge" in losses_to_be_computed:
+            loss = self.losses["edge"]
+            edge_logits = outputs.get("edge_logits", None)
+            if edge_logits is not None:
+                edge_losses = loss(
+                    edge_logits,
+                    target=inputs["depth"],
+                    mask=inputs["depth_mask"].clone(),
+                    image=inputs["image"],
+                )
+                losses["opt"][loss.name] = loss.weight * edge_losses.mean()
+            losses_to_be_computed.remove("edge")
+
+        # transparency boundary loss (gradient matching at object edges)
+        if "boundary" in losses_to_be_computed:
+            loss = self.losses["boundary"]
+            seg_labels = inputs.get("seg_labels", None)
+            boundary_losses = loss(
+                outputs["depth"],
+                target=inputs["depth"],
+                mask=inputs["depth_mask"].clone(),
+                seg_labels=seg_labels,
+            )
+            losses["opt"][loss.name] = loss.weight * boundary_losses.mean()
+            losses_to_be_computed.remove("boundary")
+
+        # gradient matching loss (Proposal 1)
+        if "grad_matching" in losses_to_be_computed:
+            loss = self.losses["grad_matching"]
+            gm_losses = loss(
+                outputs["depth"],
+                target=inputs["depth"],
+                mask=inputs["depth_mask"].clone(),
+            )
+            losses["opt"][loss.name] = loss.weight * gm_losses.mean()
+            losses_to_be_computed.remove("grad_matching")
+
+        # edge-guided local SSI loss (Proposal 2)
+        if "edge_guided_ssi" in losses_to_be_computed:
+            loss = self.losses["edge_guided_ssi"]
+            egssi_losses = loss(
+                outputs["depth"],
+                target=inputs["depth"],
+                mask=inputs["depth_mask"].clone(),
+                image=inputs["image"],
+                validity_mask=inputs["depth_mask"].clone(),
+            )
+            losses["opt"][loss.name] = loss.weight * egssi_losses.mean()
+            losses_to_be_computed.remove("edge_guided_ssi")
+
+        # multi-scale deep supervision (Proposal 4)
+        if "depth_predictions_multiscale" in outputs:
+            depth_loss_fn = self.losses["depth"]
+            ds_weights = [0.25, 0.5]  # for out8, out4 (out2 is already the main depth)
+            for i, (pred_ms, w) in enumerate(zip(
+                outputs["depth_predictions_multiscale"], ds_weights
+            )):
+                pred_up = F.interpolate(
+                    pred_ms, size=(H, W), mode="bilinear",
+                    align_corners=False, antialias=True,
+                )
+                ds_loss = depth_loss_fn(
+                    pred_up,
+                    target=inputs["depth"],
+                    mask=inputs["depth_mask"].clone(),
+                    si=si,
+                )
+                losses["opt"][f"DeepSupervision_s{i}"] = (
+                    depth_loss_fn.weight * w * ds_loss.mean()
+                )
 
         # remaining losses, we expect no more losses to be computed
         assert (
@@ -344,7 +435,7 @@ class UniDepthV1(
             self.pixel_decoder.skip_camera = skip_camera
 
         # decode all
-        pred_intrinsics, predictions, _, _ = self.pixel_decoder(inputs, {})
+        pred_intrinsics, predictions, _, _, seg_logits, _ = self.pixel_decoder(inputs, {})
 
         # undo the reshaping and get original image size (slow)
         predictions, pred_intrinsics = _postprocess(
