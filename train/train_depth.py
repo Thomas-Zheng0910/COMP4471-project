@@ -393,6 +393,19 @@ def compute_lidar_sparse_loss(
         weighted mean(|log(pred) - log(lidar)|) on valid sparse pixels.
     """
 
+    if lidar_depth.shape[-2:] != pred_depth.shape[-2:]:
+        target_size = pred_depth.shape[-2:]
+        lidar_depth = torch.nn.functional.interpolate(
+            lidar_depth, size=target_size, mode="nearest"
+        )
+        lidar_mask = torch.nn.functional.interpolate(
+            lidar_mask.float(), size=target_size, mode="nearest"
+        )
+        if lidar_confidence is not None:
+            lidar_confidence = torch.nn.functional.interpolate(
+                lidar_confidence, size=target_size, mode="nearest"
+            )
+
     valid = (
         lidar_mask.bool()
         & torch.isfinite(pred_depth)
