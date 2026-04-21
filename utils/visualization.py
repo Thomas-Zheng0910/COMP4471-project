@@ -3,6 +3,7 @@ Author: Luigi Piccinelli
 Licensed under the CC-BY NC 4.0 license (http://creativecommons.org/licenses/by-nc/4.0/)
 """
 
+from typing import List
 import os
 
 import matplotlib.pyplot as plt
@@ -25,7 +26,10 @@ def colorize(
     # normalize
     vmin = value.min() if vmin is None else vmin
     vmax = value.max() if vmax is None else vmax
-    value = (value - vmin) / (vmax - vmin)  # vmin..vmax
+    if vmax - vmin < 1e-8:
+        value = np.zeros_like(value)
+    else:
+        value = (value - vmin) / (vmax - vmin)  # vmin..vmax
 
     # set color
     cmapper = plt.get_cmap(cmap)
@@ -35,7 +39,7 @@ def colorize(
     return img
 
 
-def image_grid(imgs: list[np.ndarray], rows: int, cols: int) -> np.ndarray:
+def image_grid(imgs: List[np.ndarray], rows: int, cols: int) -> np.ndarray:
     if not len(imgs):
         return None
     assert len(imgs) == rows * cols

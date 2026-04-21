@@ -3,7 +3,7 @@
 # This software may be used and distributed in accordance with
 # the terms of the DINOv3 License Agreement.
 
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Tuple
 
 import torch
 from torch import Tensor, nn
@@ -68,7 +68,7 @@ class SelfAttentionBlock(nn.Module):
         self.sample_drop_ratio = drop_path
 
     @staticmethod
-    def _maybe_index_rope(rope: tuple[Tensor, Tensor] | None, indices: Tensor) -> tuple[Tensor, Tensor] | None:
+    def _maybe_index_rope(rope: Tuple[Tensor, Tensor] | None, indices: Tensor) -> Tuple[Tensor, Tensor] | None:
         if rope is None:
             return None
 
@@ -245,9 +245,9 @@ class CausalSelfAttentionBlock(nn.Module):
 
     def init_weights(
         self,
-        init_attn_std: float | None = None,
-        init_proj_std: float | None = None,
-        init_fc_std: float | None = None,
+        init_attn_std: Optional[float] = None,
+        init_proj_std: Optional[float] = None,
+        init_fc_std: Optional[float] = None,
         factor: float = 1.0,
     ) -> None:
         init_attn_std = init_attn_std or (self.dim**-0.5)

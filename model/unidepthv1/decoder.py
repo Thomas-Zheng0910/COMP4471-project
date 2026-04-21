@@ -3,13 +3,14 @@ Author: Luigi Piccinelli
 Licensed under the CC-BY NC 4.0 license (http://creativecommons.org/licenses/by-nc/4.0/)
 """
 
-from typing import List, Tuple
+from typing import List, Tuple, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from timm.layers import trunc_normal_
+from typing import Union
 
 from model.layers import (MLP, AttentionBlock, ConvUpsample, NystromBlock,
                              PositionEmbeddingSine)
@@ -113,11 +114,13 @@ class DepthHead(nn.Module):
         hidden_dim: int,
         num_heads: int = 8,
         expansion: int = 4,
-        depths: int | list[int] = 4,
+        depths: Union[int, List[int]] = 4,
         camera_dim: int = 256,
         num_resolutions: int = 4,
         dropout: float = 0.0,
         layer_scale: float = 1.0,
+        use_lidar_fusion: bool = False,
+        lidar_fusion_type: str = "late",  # "late" or "token"
         **kwargs,
     ) -> None:
         super().__init__()
@@ -135,6 +138,8 @@ class DepthHead(nn.Module):
             camera_dim, expansion=expansion, dropout=dropout, output_dim=hidden_dim // 4
         )
         self.to_latents = MLP(hidden_dim, expansion=2, dropout=dropout)
+        self.use_lidar_fusion = use_lidar_fusion
+        self.lidar_fusion_type = lidar_fusion_type if use_lidar_fusion else None
 
         self.features_channel_cat = nn.Linear(hidden_dim * num_resolutions, hidden_dim)
 
@@ -167,6 +172,93 @@ class DepthHead(nn.Module):
             layer_scale=layer_scale,
             context_dim=hidden_dim,
         )
+        if self.use_lidar_fusion:
+            self.lidar_encoder = nn.Sequential(
+                nn.Conv2d(3, hidden_dim // 2, kernel_size=3, stride=1, padding=1),
+                nn.GELU(),
+                nn.Conv2d(hidden_dim // 2, hidden_dim, kernel_size=3, stride=1, padding=1),
+                nn.GELU(),
+            )
+            self.prompt_lidar = AttentionBlock(
+                hidden_dim,
+                num_heads=1,
+                expansion=expansion,
+                dropout=dropout,
+                layer_scale=layer_scale,
+                context_dim=hidden_dim,
+            )
+            self.lidar_gate = nn.Sequential(
+                nn.LayerNorm(hidden_dim * 2),
+                nn.Linear(hidden_dim * 2, hidden_dim),
+                nn.GELU(),
+                nn.Linear(hidden_dim, hidden_dim),
+                nn.Sigmoid(),
+            )
+            
+            # Token fusion components (alternative to late fusion)
+            if self.lidar_fusion_type == "token":
+                # Multi-scale LiDAR token encoders
+                self.lidar_encoder_16 = nn.Sequential(
+                    nn.Conv2d(3, hidden_dim, kernel_size=1, stride=1, padding=0),
+                    nn.GELU(),
+                )
+                self.lidar_encoder_8 = nn.Sequential(
+                    nn.Conv2d(3, hidden_dim // 2, kernel_size=1, stride=1, padding=0),
+                    nn.GELU(),
+                )
+                self.lidar_encoder_4 = nn.Sequential(
+                    nn.Conv2d(3, hidden_dim // 4, kernel_size=1, stride=1, padding=0),
+                    nn.GELU(),
+                )
+                
+                # Token fusion cross-attention layers
+                self.lidar_fusion_16 = AttentionBlock(
+                    hidden_dim,
+                    num_heads=1,
+                    expansion=expansion,
+                    dropout=dropout,
+                    layer_scale=layer_scale,
+                    context_dim=hidden_dim,
+                )
+                self.lidar_fusion_8 = AttentionBlock(
+                    hidden_dim // 2,
+                    num_heads=max(1, num_heads // 2),
+                    expansion=expansion,
+                    dropout=dropout,
+                    layer_scale=layer_scale,
+                    context_dim=hidden_dim // 2,
+                )
+                self.lidar_fusion_4 = AttentionBlock(
+                    hidden_dim // 4,
+                    num_heads=max(1, num_heads // 4),
+                    expansion=expansion,
+                    dropout=dropout,
+                    layer_scale=layer_scale,
+                    context_dim=hidden_dim // 4,
+                )
+                
+                # Token gating at each scale
+                self.lidar_gate_16 = nn.Sequential(
+                    nn.LayerNorm(hidden_dim * 2),
+                    nn.Linear(hidden_dim * 2, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, hidden_dim),
+                    nn.Sigmoid(),
+                )
+                self.lidar_gate_8 = nn.Sequential(
+                    nn.LayerNorm((hidden_dim // 2) * 2),
+                    nn.Linear((hidden_dim // 2) * 2, hidden_dim // 2),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim // 2, hidden_dim // 2),
+                    nn.Sigmoid(),
+                )
+                self.lidar_gate_4 = nn.Sequential(
+                    nn.LayerNorm((hidden_dim // 4) * 2),
+                    nn.Linear((hidden_dim // 4) * 2, hidden_dim // 4),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim // 4, hidden_dim // 4),
+                    nn.Sigmoid(),
+                )
         for i, (blk_lst, depth) in enumerate(
             zip([self.layers_16, self.layers_8, self.layers_4], depths)
         ):
@@ -193,11 +285,23 @@ class DepthHead(nn.Module):
         self.shapes = shapes
 
     def forward(
-        self, features: torch.Tensor, rays_hr: torch.Tensor, pos_embed, level_embed
+        self,
+        features: torch.Tensor,
+        rays_hr: torch.Tensor,
+        pos_embed,
+        level_embed,
+        lidar_depth: torch.Tensor = None,
+        lidar_mask: torch.Tensor = None,
+        lidar_confidence: torch.Tensor = None,
     ) -> torch.Tensor:
         features = features.unbind(dim=-1)
         shapes = self.shapes
         rays_hr = rays_hr.detach()
+        fusion_stats = {
+            "lidar_used": torch.tensor(0.0, device=rays_hr.device),
+            "lidar_valid_ratio": torch.tensor(0.0, device=rays_hr.device),
+            "lidar_gate_mean": torch.tensor(0.0, device=rays_hr.device),
+        }
 
         # camera_embedding
         rays_embedding_16 = F.normalize(
@@ -236,9 +340,68 @@ class DepthHead(nn.Module):
         # Aggregate camera: D- > D|E
         latents_16 = self.prompt_camera(latents_16, context=rays_embedding_16)
 
+        # Aggregate LiDAR (optional fusion)
+        lidar_pack_16 = None
+        if self.use_lidar_fusion and lidar_depth is not None and lidar_mask is not None:
+            if lidar_confidence is None:
+                lidar_confidence = lidar_mask.float()
+            
+            lidar_pack = torch.cat(
+                [lidar_depth, lidar_mask.float(), lidar_confidence],
+                dim=1,
+            )
+            
+            lidar_valid_ratio = lidar_mask.float().mean()
+            
+            if lidar_valid_ratio > 0:
+                if self.lidar_fusion_type == "late":
+                    # Late fusion at 1/16 scale only
+                    lidar_pack_16 = F.interpolate(
+                        lidar_pack,
+                        size=shapes,
+                        mode="nearest",
+                    )
+                    lidar_features = self.lidar_encoder(lidar_pack_16)
+                    lidar_tokens = rearrange(lidar_features, "b c h w -> b (h w) c")
+                    lidar_prompt = self.prompt_lidar(latents_16, context=lidar_tokens)
+                    lidar_gate = self.lidar_gate(torch.cat([latents_16, lidar_prompt], dim=-1))
+                    latents_16 = latents_16 + lidar_gate * (lidar_prompt - latents_16)
+
+                    fusion_stats = {
+                        "lidar_used": torch.tensor(1.0, device=rays_hr.device),
+                        "lidar_valid_ratio": lidar_valid_ratio.detach(),
+                        "lidar_gate_mean": lidar_gate.mean().detach(),
+                    }
+                else:
+                    # Token fusion will be applied after layers at each scale
+                    # Store lidar_pack for later use
+                    lidar_pack_16 = F.interpolate(
+                        lidar_pack,
+                        size=shapes,
+                        mode="nearest",
+                    )
+                    fusion_stats = {
+                        "lidar_used": torch.tensor(1.0, device=rays_hr.device),
+                        "lidar_valid_ratio": lidar_valid_ratio.detach(),
+                        "lidar_gate_mean": torch.tensor(0.0, device=rays_hr.device),
+                    }
+            else:
+                lidar_pack_16 = None
+                lidar_valid_ratio = torch.tensor(0.0, device=rays_hr.device)
+
         # Block 16 - Out 8
         for layer in self.layers_16:
             latents_16 = layer(latents_16, pos_embed=rays_embedding_16)
+        
+        # Token fusion at 16 scale
+        if self.use_lidar_fusion and self.lidar_fusion_type == "token" and lidar_pack_16 is not None:
+            lidar_features_16 = self.lidar_encoder_16(lidar_pack_16)
+            lidar_tokens_16 = rearrange(lidar_features_16, "b c h w -> b (h w) c")
+            lidar_fusion_16 = self.lidar_fusion_16(latents_16, context=lidar_tokens_16)
+            lidar_gate_16 = self.lidar_gate_16(torch.cat([latents_16, lidar_fusion_16], dim=-1))
+            latents_16 = latents_16 + lidar_gate_16 * (lidar_fusion_16 - latents_16)
+            fusion_stats["lidar_gate_mean"] = lidar_gate_16.mean().detach()
+        
         latents_8 = self.up8(
             rearrange(
                 latents_16 + rays_embedding_16,
@@ -256,6 +419,20 @@ class DepthHead(nn.Module):
         # Block 8 - Out 4
         for layer in self.layers_8:
             latents_8 = layer(latents_8, pos_embed=rays_embedding_8)
+        
+        # Token fusion at 8 scale
+        if self.use_lidar_fusion and self.lidar_fusion_type == "token" and lidar_pack_16 is not None:
+            lidar_pack_8 = F.interpolate(
+                torch.cat([lidar_depth, lidar_mask.float(), lidar_confidence], dim=1),
+                size=[shapes[0] * 2, shapes[1] * 2],
+                mode="nearest",
+            )
+            lidar_features_8 = self.lidar_encoder_8(lidar_pack_8)
+            lidar_tokens_8 = rearrange(lidar_features_8, "b c h w -> b (h w) c")
+            lidar_fusion_8 = self.lidar_fusion_8(latents_8, context=lidar_tokens_8)
+            lidar_gate_8 = self.lidar_gate_8(torch.cat([latents_8, lidar_fusion_8], dim=-1))
+            latents_8 = latents_8 + lidar_gate_8 * (lidar_fusion_8 - latents_8)
+        
         latents_4 = self.up4(
             rearrange(
                 latents_8 + rays_embedding_8,
@@ -273,6 +450,20 @@ class DepthHead(nn.Module):
         # Block 4 - Out 2
         for layer in self.layers_4:
             latents_4 = layer(latents_4, pos_embed=rays_embedding_4)
+        
+        # Token fusion at 4 scale
+        if self.use_lidar_fusion and self.lidar_fusion_type == "token" and lidar_pack_16 is not None:
+            lidar_pack_4 = F.interpolate(
+                torch.cat([lidar_depth, lidar_mask.float(), lidar_confidence], dim=1),
+                size=[shapes[0] * 4, shapes[1] * 4],
+                mode="nearest",
+            )
+            lidar_features_4 = self.lidar_encoder_4(lidar_pack_4)
+            lidar_tokens_4 = rearrange(lidar_features_4, "b c h w -> b (h w) c")
+            lidar_fusion_4 = self.lidar_fusion_4(latents_4, context=lidar_tokens_4)
+            lidar_gate_4 = self.lidar_gate_4(torch.cat([latents_4, lidar_fusion_4], dim=-1))
+            latents_4 = latents_4 + lidar_gate_4 * (lidar_fusion_4 - latents_4)
+        
         latents_2 = self.up2(
             rearrange(
                 latents_4 + rays_embedding_4,
@@ -297,7 +488,7 @@ class DepthHead(nn.Module):
         out4 = out4.clamp(-10.0, 10.0).exp()
         out8 = out8.clamp(-10.0, 10.0).exp()
 
-        return out8, out4, out2, proj_latents_16
+        return out8, out4, out2, proj_latents_16, fusion_stats
 
 
 class Decoder(nn.Module):
@@ -453,14 +644,17 @@ class Decoder(nn.Module):
         # run bulk of the model
         self.depth_layer.set_shapes(common_shape)
         self.depth_layer.set_original_shapes((H, W))
-        out8, out4, out2, depth_features = self.depth_layer(
+        out8, out4, out2, depth_features, fusion_stats = self.depth_layer(
             features=features,
             rays_hr=rays,
             pos_embed=pos_embed,
             level_embed=level_embed,
+            lidar_depth=inputs.get("lidar_depth", None),
+            lidar_mask=inputs.get("lidar_mask", None),
+            lidar_confidence=inputs.get("lidar_confidence", None),
         )
 
-        return intrinsics, [out8, out4, out2], depth_features
+        return intrinsics, [out8, out4, out2], depth_features, fusion_stats
 
     @torch.jit.ignore
     def no_weight_decay_keywords(self):
@@ -518,6 +712,8 @@ class Decoder(nn.Module):
             camera_dim=81,
             num_resolutions=self.num_resolutions,
             layer_scale=layer_scale,
+            use_lidar_fusion=config["model"]["pixel_decoder"].get("use_lidar_fusion", False),
+            lidar_fusion_type=config["model"]["pixel_decoder"].get("lidar_fusion_type", "late"),
         )
 
         # transformer part

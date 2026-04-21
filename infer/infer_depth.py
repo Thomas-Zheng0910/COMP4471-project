@@ -87,10 +87,21 @@ def get_args() -> argparse.Namespace:
                         help="Number of attention heads.")
     parser.add_argument("--expansion", type=int, default=4,
                         help="MLP expansion factor.")
+    parser.add_argument(
+        "--use_lidar_fusion",
+        type=lambda x: x.lower() == "true",
+        default=False,
+        help="Enable LiDAR-fusion decoder architecture when loading Phase-3 checkpoints.",
+    )
+    parser.add_argument(
+        "--lidar_fusion_type", type=str, default="late",
+        choices=["late", "token"],
+        help="Fusion type (must match checkpoint).",
+    )
 
     # --- Data ---
     parser.add_argument(
-        "--image_shape", type=int, nargs=2, default=[384, 384],
+        "--image_shape", type=int, nargs=2, default=[480, 640],
         help="Network input resolution (H W) — must match training.",
     )
     parser.add_argument(
@@ -139,6 +150,8 @@ def build_config(args: argparse.Namespace) -> dict:
                 "hidden_dim": args.hidden_dim,
                 "dropout": args.dropout,
                 "depths": args.depths,
+                "use_lidar_fusion": args.use_lidar_fusion,
+                "lidar_fusion_type": args.lidar_fusion_type,
             },
             "num_heads": args.num_heads,
             "expansion": args.expansion,
@@ -184,32 +197,6 @@ def load_checkpoint(model: UniDepthV1, ckpt_path: str, device: torch.device) -> 
     print(f"Checkpoint loaded from {ckpt_path}")
     print(f"  missing keys : {info.missing_keys}")
     print(f"  unexpected keys: {info.unexpected_keys}")
-
-def compute_metrics(
-    pred: torch.Tensor,
-    gt: torch.Tensor,
-    mask: torch.Tensor,
-) -> dict:
-    """
-    Compute RMSE, SILog, REL (abs_rel), and log10 for one sample.
-
-    Args:
-        pred:  Predicted depth  [H, W], float32, metres.
-        gt:    Ground-truth depth [H, W], float32, metres.
-        mask:  Boolean validity mask [H, W].
-
-    Returns:
-        Dict with keys "rmse", "silog", "rel", "log10".
-    """
-    p = pred[mask].float().clamp(min=1e-6)
-    g = gt[mask].float().clamp(min=1e-6)
-
-    rmse  = torch.sqrt(((g - p) ** 2).mean()).item()
-    silog = (100.0 * torch.std(torch.log(p) - torch.log(g))).item()
-    rel   = (torch.abs(g - p) / g).mean().item()
-    log10 = torch.abs(torch.log10(p) - torch.log10(g)).mean().item()
-
-    return {"rmse": rmse, "silog": silog, "rel": rel, "log10": log10}
 
 def load_intrinsics(intrinsics_path: str):
     """Load optional intrinsics JSON → dict  {stem: [fx, fy, cx, cy]}."""
@@ -358,9 +345,9 @@ def main():
         print(f"\n>>> Running inference on images in {args.image_folder} >>>")
 
         # Collect image paths
-        data_root = Path(args.data_root)
-        images_dir = data_root / "images"
-        depths_dir = data_root / "depths"
+        folder_root = Path(args.image_folder)
+        images_dir = folder_root / "images"
+        depths_dir = folder_root / "depths"
         if not images_dir.exists():
             raise FileNotFoundError(f"Images directory not found: {images_dir}")
 
@@ -378,7 +365,7 @@ def main():
 
         # Load optional intrinsics JSON
         # NOTE: if not found, returns NONE and the following code will use a default intrinsics
-        intrinsics_map: Optional[Dict[str, List[float]]] = load_intrinsics(str(data_root / "intrinsics.json"))
+        intrinsics_map: Optional[Dict[str, List[float]]] = load_intrinsics(str(folder_root / "intrinsics.json"))
 
         print(f"\033[92mFound {len(image_paths)} image(s) in {images_dir}\033[0m")
         if has_gt:

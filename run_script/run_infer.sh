@@ -2,59 +2,54 @@
 
 # run_infer.sh — Inference and evaluation script for UniDepthV1.
 #
-# Pairs with infer/infer_depth.py.
-# Configure the variables in each section below, then run:
+# Evaluates a trained checkpoint on the NYUv2 test set and/or a custom
+# image folder. Copy and fill in the "..." placeholders before running:
 #   bash run_script/run_infer.sh
 
 # Cache directory
-# torch.hub download location
 export TORCH_HOME="./cache"
-# Set hugging face and transformers cache location
 export TRANSFORMERS_CACHE="./cache"
 export HF_HOME="./cache"
 export HF_HUB_CACHE="./cache"
 
-# Checkpoint & output
+# ─── Checkpoint & output ─────────────────────────────────────────────────────
 # Path to the .pth checkpoint saved by train_depth.py
 CHECKPOINT="..."
 
-# Where to write the metrics JSON
-OUTPUT_DIR="..."
+# Where to write metrics JSON and visualisations
+OUTPUT_DIR="runs/infer"
 
-# Device
-CUDA=...
+# ─── Device ──────────────────────────────────────────────────────────────────
+CUDA=0
 
-# Dataset
-# Path to the dataset file
-# NOTE: please make sure to import the correct dataset class in infer/infer_depth.py
+# ─── Dataset evaluation ─────────────────────────────────────────────────────
+# Path to dataset file (set to "" to skip dataset evaluation)
 DATA_ROOT="datasets/nyu_depth_v2_labeled.mat"
 # Which split to evaluate
 SPLIT="test"
 
-# Optional: infers on given folder of RGB images
-# IMAGE_FOLDER
-# -> images
-# -> depths (optional, for evaluation)
-# -> intrinsics.json (optional, for better inference)
+# ─── Folder inference (optional) ─────────────────────────────────────────────
+# Set to a folder path to run inference on arbitrary images
+# Expected layout:
+#   IMAGE_FOLDER/
+#     images/        — RGB images (png/jpg)
+#     depths/        — (optional) GT depth PNGs for evaluation
+#     intrinsics.json — (optional) per-image intrinsics {stem: [fx, fy, cx, cy]}
 IMAGE_FOLDER=""
 
-# Scale factor to convert raw depth values to metres.
-# NOTE: global to all datasets
-DEPTH_SCALE=1.0
+# ─── Depth settings ──────────────────────────────────────────────────────────
+# Scale factor to convert raw depth values to metres (dataset eval uses its own)
+DEPTH_SCALE=0.001
 
-# Maximum depth (metres) used as an upper cap during evaluation.
-# NOTE: global to all datasets
+# Maximum depth (metres) used as upper cap during evaluation
 MAX_DEPTH=10.0
 
-# Model architecture — must exactly match the checkpoint
-ENCODER_NAME="convnext_large_pt"
+# ─── Model architecture (must exactly match the checkpoint) ──────────────────
+ENCODER_NAME="dinov3_vitl16"
 
-# Feature-map indices for the encoder.
-# Leave OUTPUT_IDX empty to use the encoder's default indices.
-# Examples:
-#   convnextv2_large : OUTPUT_IDX=""          (uses encoder default)
-#   dinov3_vits16    : OUTPUT_IDX="3 6 9 12"
-OUTPUT_IDX=""
+# Feature-map indices for the encoder
+# dinov3_vits16: "3 6 9 12",  dinov3_vitl16: "5 12 18 24"
+OUTPUT_IDX="5 12 18 24"
 
 USE_CHECKPOINT="false"
 
@@ -65,6 +60,11 @@ DEPTHS="3 2 1"
 NUM_HEADS=8
 EXPANSION=4
 
+# LiDAR fusion (set to "true" only for Phase 3+ checkpoints)
+USE_LIDAR_FUSION="false"
+# Fusion type: "late" or "token" (must match checkpoint)
+LIDAR_FUSION_TYPE="late"
+
 # Network input resolution (H W) — must match training
 IMAGE_SHAPE="480 640"
 
@@ -72,7 +72,7 @@ IMAGE_SHAPE="480 640"
 BATCH_SIZE=4
 NUM_WORKERS=4
 
-# Build command
+# ─── Build command ───────────────────────────────────────────────────────────
 CMD="python -m infer.infer_depth \
     --checkpoint $CHECKPOINT \
     --split $SPLIT \
@@ -89,7 +89,9 @@ CMD="python -m infer.infer_depth \
     --depth_scale $DEPTH_SCALE \
     --max_depth $MAX_DEPTH \
     --batch_size $BATCH_SIZE \
-    --num_workers $NUM_WORKERS"
+    --num_workers $NUM_WORKERS \
+    --use_lidar_fusion $USE_LIDAR_FUSION \
+    --lidar_fusion_type $LIDAR_FUSION_TYPE"
 
 # Append data_root only when it is non-empty
 if [ -n "$DATA_ROOT" ]; then

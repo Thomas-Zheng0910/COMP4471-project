@@ -46,7 +46,7 @@ def masked_mean_var(
     return mask_mean, mask_var
 
 
-def masked_mean(data: torch.Tensor, mask: torch.Tensor | None, dim: List[int]):
+def masked_mean(data: torch.Tensor, mask: Optional[torch.Tensor], dim: List[int]):
     if mask is None:
         return data.mean(dim=dim, keepdim=True)
     mask = mask.float()
@@ -58,7 +58,7 @@ def masked_mean(data: torch.Tensor, mask: torch.Tensor | None, dim: List[int]):
 
 
 def masked_quantile(
-    data: torch.Tensor, mask: torch.Tensor | None, dims: List[int], q: float
+    data: torch.Tensor, mask: Optional[torch.Tensor], dims: List[int], q: float
 ):
     """
     Compute the quantile of the data only where the mask is 1 along specified dimensions.
@@ -159,8 +159,8 @@ def masked_weighted_mean_var(
 
 
 def ssi(
-    input: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, dim: list[int]
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    input: torch.Tensor, target: torch.Tensor, mask: torch.Tensor, dim: List[int]
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     # recalculate mask with points in 95% confidence interval
     # the statistics are calculated on the stable points and
     # are similar ot median/MAD, but median/MAD gradients
