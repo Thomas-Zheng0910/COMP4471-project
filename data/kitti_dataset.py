@@ -63,7 +63,7 @@ def _default_depth_transform(resample_shape: Optional[Tuple[int, int]]) -> Calla
     def transform(depth_np: np.ndarray) -> torch.Tensor:
         if resample_shape is not None:
             depth_pil = Image.fromarray(depth_np.astype(np.float32), mode = "F")
-            depth_pil = depth_pil.resize(resample_shape, resample = RESAMPLE_NEAREST)
+            depth_pil = depth_pil.resize((resample_shape[1], resample_shape[0]), resample = RESAMPLE_NEAREST)
             depth_np_resampled = np.array(depth_pil, dtype = np.float32)
             return torch.from_numpy(depth_np_resampled).unsqueeze(0)
         return torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)

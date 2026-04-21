@@ -106,7 +106,7 @@ def _default_depth_transform(resample_shape: Tuple[int, int] = None) -> Callable
         if resample_shape is not None:
             # Resample depth map using PIL (nearest neighbour to preserve values)
             depth_pil = Image.fromarray(depth_np.astype(np.float32), mode = "F")
-            depth_pil_resampled = depth_pil.resize(resample_shape, resample = Image.NEAREST)
+            depth_pil_resampled = depth_pil.resize((resample_shape[1], resample_shape[0]), resample = Image.NEAREST)
             depth_np_resampled = np.array(depth_pil_resampled, dtype = np.float32)
             return torch.from_numpy(depth_np_resampled).unsqueeze(0)
         return torch.from_numpy(depth_np.astype(np.float32)).unsqueeze(0)
