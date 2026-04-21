@@ -39,8 +39,11 @@ from pathlib import Path
 
 import numpy as np
 import h5py
-from PIL import Image
+from PIL import Image, ImageFile
 from scipy.spatial import cKDTree
+
+# Tolerate slightly truncated JPEGs (common in bulk-downloaded datasets)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 # ─── Core simulation ────────────────────────────────────────────────────────
@@ -254,7 +257,11 @@ def process_image_dir(input_dir, depth_suffix, output_dir, lidar_h, lidar_w,
         for ext in [".jpg", ".png", ".jpeg"]:
             rgb_path = f.parent / f"{stem}{ext}"
             if rgb_path.exists() and rgb_path != f:
-                rgb = np.array(Image.open(rgb_path).convert("RGB"), dtype=np.float32)
+                try:
+                    rgb = np.array(Image.open(rgb_path).convert("RGB"), dtype=np.float32)
+                except OSError as e:
+                    print(f"Warning: Could not load RGB {rgb_path} ({e}), using spatial-only interp")
+                    rgb = None
                 break
 
         sim = simulate_lidar(depth, rgb, lidar_h, lidar_w, stride, knn_k,

@@ -39,6 +39,7 @@ MAX_DEPTH: float = 10.0
 
 # Raw depth values in the .mat file are in metres (float32 already scaled)
 DEPTH_SCALE: float = 1.0
+LIDAR_DEPTH_SCALE: float = 1.0
 
 # Image net normalisation stats (from torchvision.transforms)
 # NOTE: These are used in inferencing (revert normalised images)
@@ -177,6 +178,9 @@ class ToMDataset(Dataset):
         split: str = "train",
         image_shape: Tuple[int, int] = (384, 384),
         depth_scale: float = DEPTH_SCALE,
+        use_lidar: bool = False,
+        lidar_root: Optional[str] = None,
+        lidar_depth_scale: float = LIDAR_DEPTH_SCALE,
         flip_aug: bool = False,
         seed: int = SPLIT_SEED,
         image_transform: Optional[Callable] = None,
@@ -198,8 +202,17 @@ class ToMDataset(Dataset):
         self.split = split
         self.flip_aug = flip_aug
         self.depth_scale = depth_scale
+        self.use_lidar = use_lidar
+        self.lidar_root = Path(lidar_root) if lidar_root is not None else None
+        self.lidar_depth_scale = lidar_depth_scale
         self.image_shape = tuple(image_shape) if image_shape is not None else None
         self.return_intrinsics = return_intrinsics
+
+        if self.use_lidar and self.lidar_root is None:
+            raise ValueError(
+                "use_lidar=True but lidar_root is not set. "
+                "Provide the path to the simulated LiDAR directory "
+                "(e.g. 'datasets/tom_lidar_projected').")
 
         # Transforms
         self.image_transform = (
@@ -227,11 +240,36 @@ class ToMDataset(Dataset):
     def __len__(self) -> int:
         return len(self.pairs)
 
+    def _load_lidar(self, depth_path: Path) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+        """
+        Load simulated LiDAR depth for a given depth map path.
+
+        The LiDAR .npy files mirror the depth file's relative path under
+        ``self.root`` but live under ``self.lidar_root`` with a .npy extension.
+        """
+        if self.lidar_root is None:
+            raise RuntimeError("LiDAR root is not configured.")
+
+        rel = depth_path.relative_to(self.root)
+        lidar_path = self.lidar_root / rel.with_suffix(".npy")
+
+        if not lidar_path.is_file():
+            raise FileNotFoundError(
+                f"No LiDAR file found for depth '{depth_path}' "
+                f"(expected '{lidar_path}')."
+            )
+
+        lidar_depth = np.load(lidar_path).astype(np.float32)
+        return lidar_depth, None
+
     def _make_sample(
         self,
         image_tensor: torch.Tensor,
         depth_tensor: torch.Tensor,
         depth_mask: torch.Tensor,
+        lidar_depth_tensor: Optional[torch.Tensor],
+        lidar_mask_tensor: Optional[torch.Tensor],
+        lidar_confidence_tensor: Optional[torch.Tensor],
         flip: bool,
     ) -> Dict:
         
@@ -240,6 +278,12 @@ class ToMDataset(Dataset):
             image_tensor = torch.flip(image_tensor, dims = [-1])
             depth_tensor = torch.flip(depth_tensor, dims = [-1])
             depth_mask = torch.flip(depth_mask, dims = [-1])
+            if lidar_depth_tensor is not None:
+                lidar_depth_tensor = torch.flip(lidar_depth_tensor, dims = [-1])
+            if lidar_mask_tensor is not None:
+                lidar_mask_tensor = torch.flip(lidar_mask_tensor, dims = [-1])
+            if lidar_confidence_tensor is not None:
+                lidar_confidence_tensor = torch.flip(lidar_confidence_tensor, dims = [-1])
 
         # Build the sample dictionary
         sample: Dict = {
@@ -248,7 +292,14 @@ class ToMDataset(Dataset):
             "depth_mask": depth_mask,
             "flip": flip,
             "si": False,
+            "has_lidar": lidar_depth_tensor is not None,
         }
+
+        if lidar_depth_tensor is not None and lidar_mask_tensor is not None:
+            sample["lidar_depth"] = lidar_depth_tensor
+            sample["lidar_mask"] = lidar_mask_tensor
+            if lidar_confidence_tensor is not None:
+                sample["lidar_confidence"] = lidar_confidence_tensor
 
         # Optionally include intrinsics
         # (same for all samples, but depends on flip)
@@ -276,18 +327,61 @@ class ToMDataset(Dataset):
 
         # Apply depth transform and clamp to valid range
         depth_tensor: torch.Tensor = self.depth_transform(depth_np)
+        depth_mask = (
+            torch.isfinite(depth_tensor)
+            & (depth_tensor > MIN_DEPTH)
+            & (depth_tensor <= MAX_DEPTH)
+        )
         depth_tensor = torch.clamp(depth_tensor, MIN_DEPTH, MAX_DEPTH)
 
-        # Create a mask of valid depth pixels (where depth > 0)
-        depth_mask = depth_tensor > 0
+        # Optional LiDAR sparse depth
+        lidar_depth_tensor: Optional[torch.Tensor] = None
+        lidar_mask_tensor: Optional[torch.Tensor] = None
+        lidar_confidence_tensor: Optional[torch.Tensor] = None
+        if self.use_lidar:
+            lidar_depth_np, lidar_conf_np = self._load_lidar(depth_path)
+            lidar_depth_np = (
+                lidar_depth_np * self.lidar_depth_scale
+                if self.lidar_depth_scale != 1.0
+                else lidar_depth_np
+            )
+
+            lidar_depth_tensor_raw = self.depth_transform(lidar_depth_np)
+            lidar_mask_tensor = (
+                torch.isfinite(lidar_depth_tensor_raw)
+                & (lidar_depth_tensor_raw > MIN_DEPTH)
+            )
+            lidar_depth_tensor = torch.clamp(lidar_depth_tensor_raw, MIN_DEPTH, MAX_DEPTH)
+            lidar_depth_tensor = torch.where(
+                lidar_mask_tensor,
+                lidar_depth_tensor,
+                torch.zeros_like(lidar_depth_tensor),
+            )
+
+            if lidar_conf_np is not None:
+                lidar_confidence_tensor = self.depth_transform(lidar_conf_np)
+                lidar_confidence_tensor = torch.clamp(lidar_confidence_tensor, min = 0.0)
+                lidar_confidence_tensor = torch.where(
+                    lidar_mask_tensor,
+                    lidar_confidence_tensor,
+                    torch.zeros_like(lidar_confidence_tensor),
+                )
+            else:
+                lidar_confidence_tensor = lidar_mask_tensor.float()
 
         # Return the sample(s), applying flip augmentation if specified
         if self.flip_aug:
-            original = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
-            flipped = self._make_sample(image_tensor, depth_tensor, depth_mask, flip = True)
+            original = self._make_sample(image_tensor, depth_tensor, depth_mask,
+                                         lidar_depth_tensor, lidar_mask_tensor,
+                                         lidar_confidence_tensor, flip = False)
+            flipped = self._make_sample(image_tensor, depth_tensor, depth_mask,
+                                        lidar_depth_tensor, lidar_mask_tensor,
+                                        lidar_confidence_tensor, flip = True)
             return original, flipped
         else:
-            return self._make_sample(image_tensor, depth_tensor, depth_mask, flip = False)
+            return self._make_sample(image_tensor, depth_tensor, depth_mask,
+                                     lidar_depth_tensor, lidar_mask_tensor,
+                                     lidar_confidence_tensor, flip = False)
 
     def __repr__(self) -> str:
         return (

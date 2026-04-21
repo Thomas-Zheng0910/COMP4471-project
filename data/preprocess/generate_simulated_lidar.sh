@@ -21,7 +21,7 @@
 
 set -e
 
-DATASET="${1:-nyuv2}"
+DATASET="${1:-all}"
 LIDAR_H=192
 LIDAR_W=256
 STRIDE=7

@@ -13,7 +13,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Experiment Configuration
 SEED=648
-CUDA=4
+CUDA=0
 # EPOCHS=200
 EPOCHS=100
 BATCH_SIZE=1
@@ -57,10 +57,25 @@ IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
 NUM_WORKERS=8
 MAX_TRAIN_SAMPLES=5000  # cap samples per epoch (0=use all; full dataset is ~49k)
-DATASETS="nyuv2,sunrgbd,vkitti2,sintel"
+DATASETS="nyuv2,ToM"
+
+# LiDAR Configuration (set USE_LIDAR=true to enable)
+USE_LIDAR=true
+LIDAR_ROOT="datasets/nyuv2_lidar_projected,datasets/tom_lidar_projected"  # global fallback; used when DATASET_LIDAR_ROOTS entry is empty
+# Per-dataset LiDAR roots, comma-separated and parallel to DATASETS.
+# Leave an entry empty to fall back to LIDAR_ROOT, or omit entirely to use LIDAR_ROOT for all.
+# Example (nyuv2 + ToM, others have no LiDAR):
+#   DATASETS="nyuv2,sunrgbd,vkitti2,sintel,ToM"
+#   DATASET_LIDAR_ROOTS="datasets/nyuv2_lidar_projected,datasets/tom_lidar_projected"
+DATASET_LIDAR_ROOTS=""       # leave empty to use LIDAR_ROOT for all LiDAR-capable datasets
+LIDAR_DEPTH_SCALE=1.0
+LIDAR_LOSS_WEIGHT=0.5
+LIDAR_DROPOUT_PROB=0.0
+USE_LIDAR_FUSION=true        # enable LiDAR fusion in the decoder
+LIDAR_FUSION_TYPE="token"    # "late" or "token"
 
 # Checkpoint Resume (leave empty for fresh start)
-RESUME="runs/train_depth_1776440192635_444800/checkpoints/epoch_10.pth"
+RESUME=""
 
 # Build Command
 CMD="python -m train.train_depth \
@@ -97,6 +112,12 @@ CMD="python -m train.train_depth \
     --num_workers $NUM_WORKERS \
     --datasets $DATASETS \
     --max_train_samples $MAX_TRAIN_SAMPLES \
+    --use_lidar $USE_LIDAR \
+    --lidar_depth_scale $LIDAR_DEPTH_SCALE \
+    --lidar_loss_weight $LIDAR_LOSS_WEIGHT \
+    --lidar_dropout_prob $LIDAR_DROPOUT_PROB \
+    --use_lidar_fusion $USE_LIDAR_FUSION \
+    --lidar_fusion_type $LIDAR_FUSION_TYPE \
     --script_path $0"
 
 # Add conditional arguments
@@ -118,6 +139,14 @@ fi
 
 if [ "$AMP" = "true" ]; then
     CMD="$CMD --amp"
+fi
+
+if [ -n "$LIDAR_ROOT" ]; then
+    CMD="$CMD --lidar_root $LIDAR_ROOT"
+fi
+
+if [ -n "$DATASET_LIDAR_ROOTS" ]; then
+    CMD="$CMD --dataset_lidar_roots $DATASET_LIDAR_ROOTS"
 fi
 
 # Execute Command

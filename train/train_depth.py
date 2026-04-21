@@ -109,6 +109,11 @@ def get_args() -> argparse.Namespace:
                         help='Comma-separated training dataset names (e.g. "nyuv2,sunrgbd,vkitti2,sintel")')
     parser.add_argument('--dataset_roots', type=str, default=None,
                         help='Comma-separated roots matching --datasets (uses defaults if omitted)')
+    parser.add_argument('--dataset_lidar_roots', type=str, default=None,
+                        help='Comma-separated lidar_root per dataset, parallel to --datasets. '
+                             'Use empty string to fall back to global --lidar_root. '
+                             'E.g. "datasets/nyuv2_lidar_projected,,datasets/tom_lidar_projected" '
+                             'for nyuv2, sunrgbd (no lidar), ToM')
 
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
@@ -198,6 +203,7 @@ def build_config(args: argparse.Namespace) -> dict:
             "lidar_depth_scale": args.lidar_depth_scale,
             "lidar_h5_key": args.lidar_h5_key,
             "lidar_confidence_h5_key": args.lidar_confidence_h5_key,
+            "dataset_lidar_roots": args.dataset_lidar_roots,  # raw CSV string, resolved in build_dataset
             "num_workers": args.num_workers,
             "max_train_samples": args.max_train_samples,
             "max_val_samples": args.max_val_samples,
@@ -234,21 +240,58 @@ def _unified_collate_fn(batch):
     img_metas = [{k: item[k] for k in META_KEYS if k in item} for item in batch]
     data_keys = [k for k in batch[0].keys() if k not in META_KEYS]
     collated = {}
-    # TODO: handle has_lidar in a more general way
-    if "has_lidar" in data_keys:
-        data_keys.remove("has_lidar")
+    # liDAR is enabled for nyuv2, ToM. If other datasets are used, which does not configure lidar, uncomment to below code
+    # # TODO: handle has_lidar in a more general way
+    # if "has_lidar" in data_keys:
+    #     data_keys.remove("has_lidar")
     for key in data_keys:
         vals = [item[key] for item in batch]
         collated[key] = torch.stack(vals, dim=0) if isinstance(vals[0], torch.Tensor) else vals
     return {"data": collated, "img_metas": img_metas}
 
 
+def _resolve_lidar_root(name: str, data_cfg: dict, dataset_names: list) -> str | None:
+    """Return the lidar_root for a given dataset name.
+
+    Resolution order:
+    1. ``data_cfg["dataset_lidar_roots"]`` — CSV parallel to ``dataset_names``.
+       An empty entry means "fall through to next level".
+    2. ``data_cfg["lidar_root"]`` — also parsed as CSV parallel to
+       ``dataset_names`` when it contains commas; otherwise used as-is.
+    """
+    def _pick_from_csv(csv_raw: str) -> str | None:
+        entries = [s.strip() for s in csv_raw.split(",")]
+        if name in dataset_names:
+            idx = dataset_names.index(name)
+            if idx < len(entries) and entries[idx]:
+                return entries[idx]
+        return None
+
+    per_ds_csv = data_cfg.get("dataset_lidar_roots") or ""
+    if per_ds_csv:
+        result = _pick_from_csv(per_ds_csv)
+        if result:
+            return result
+
+    global_root = data_cfg.get("lidar_root") or ""
+    if "," in global_root:
+        result = _pick_from_csv(global_root)
+        if result:
+            return result
+        return None
+    return global_root or None
+
+
 def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = None,
-                  flip_aug: bool = False, extra_kwargs: dict = None):
+                  flip_aug: bool = False, extra_kwargs: dict = None,
+                  dataset_names: list = None):
     """Build a dataset by name with common parameters."""
     root = root_override or DATASET_DEFAULT_ROOTS.get(name)
     image_shape = data_cfg["image_shape"]
     depth_scale = data_cfg.get("depth_scale", 1.0)
+    if dataset_names is None:
+        dataset_names = [name]
+    lidar_root = _resolve_lidar_root(name, data_cfg, dataset_names)
 
     if name == "nyuv2":
         return NYUv2Dataset(
@@ -257,7 +300,7 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
             image_shape=image_shape,
             depth_scale=depth_scale,
             use_lidar=data_cfg.get("use_lidar", False),
-            lidar_root=data_cfg.get("lidar_root"),
+            lidar_root=lidar_root,
             lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
             lidar_h5_key=data_cfg.get("lidar_h5_key"),
             lidar_confidence_h5_key=data_cfg.get("lidar_confidence_h5_key"),
@@ -266,7 +309,11 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
     elif name == "ToM":
         from data.ToM_dataset import ToMDataset
         return ToMDataset(root=root, split=split, image_shape=image_shape,
-                          depth_scale=depth_scale, flip_aug=flip_aug)
+                          depth_scale=depth_scale,
+                          use_lidar=data_cfg.get("use_lidar", False),
+                          lidar_root=lidar_root,
+                          lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
+                          flip_aug=flip_aug)
                         
     elif name == "sunrgbd":
         from data.sunrgbd_dataset import SUNRGBDDataset
@@ -498,6 +545,7 @@ def main():
             data_cfg=data_cfg,
             root_override=dataset_roots_override.get(ds_name),
             flip_aug=True,
+            dataset_names=dataset_names,
         )
         train_datasets.append(ds)
         print(f"  {ds_name}: {len(ds)} train samples")
@@ -540,7 +588,7 @@ def main():
                 image_shape = data_cfg["image_shape"],
                 depth_scale = data_cfg.get("depth_scale", 1.0),
                 use_lidar = data_cfg.get("use_lidar", False),
-                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_root = _resolve_lidar_root("nyuv2", data_cfg, dataset_names),
                 lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
                 lidar_h5_key = data_cfg.get("lidar_h5_key", None),
                 lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
@@ -553,7 +601,7 @@ def main():
                 image_shape = data_cfg["image_shape"],
                 depth_scale = data_cfg.get("depth_scale", 1.0),
                 use_lidar = data_cfg.get("use_lidar", False),
-                lidar_root = data_cfg.get("lidar_root", None),
+                lidar_root = _resolve_lidar_root("nyuv2", data_cfg, dataset_names),
                 lidar_depth_scale = data_cfg.get("lidar_depth_scale", 1.0),
                 lidar_h5_key = data_cfg.get("lidar_h5_key", None),
                 lidar_confidence_h5_key = data_cfg.get("lidar_confidence_h5_key", None),
