@@ -216,6 +216,7 @@ DATASET_DEFAULT_ROOTS = {
     "sunrgbd": "datasets/SUNRGBD",
     "vkitti2": "datasets/virtual_kitti_2",
     "sintel": "datasets/unidepth_data",
+    "ToM": "datasets/Diffusion4RobustDepth/ToM",
 }
 
 
