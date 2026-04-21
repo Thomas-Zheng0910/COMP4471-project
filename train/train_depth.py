@@ -260,7 +260,7 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
             flip_aug=flip_aug,
         )
     elif name == "ToM":
-        from data.tom_dataset import ToMDataset
+        from data.ToM_dataset import ToMDataset
         return ToMDataset(root=root, split=split, image_shape=image_shape,
                           depth_scale=depth_scale, flip_aug=flip_aug)
                         
