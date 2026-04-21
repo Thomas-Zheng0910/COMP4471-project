@@ -233,6 +233,9 @@ def _unified_collate_fn(batch):
     img_metas = [{k: item[k] for k in META_KEYS if k in item} for item in batch]
     data_keys = [k for k in batch[0].keys() if k not in META_KEYS]
     collated = {}
+    # TODO: handle has_lidar in a more general way
+    if "has_lidar" in data_keys:
+        data_keys.remove("has_lidar")
     for key in data_keys:
         vals = [item[key] for item in batch]
         collated[key] = torch.stack(vals, dim=0) if isinstance(vals[0], torch.Tensor) else vals
