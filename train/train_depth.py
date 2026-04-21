@@ -259,6 +259,11 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
             lidar_confidence_h5_key=data_cfg.get("lidar_confidence_h5_key"),
             flip_aug=flip_aug,
         )
+    elif name == "ToM":
+        from data.tom_dataset import ToMDataset
+        return ToMDataset(root=root, split=split, image_shape=image_shape,
+                          depth_scale=depth_scale, flip_aug=flip_aug)
+                        
     elif name == "sunrgbd":
         from data.sunrgbd_dataset import SUNRGBDDataset
         return SUNRGBDDataset(root=root, split=split, image_shape=image_shape,
