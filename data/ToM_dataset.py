@@ -117,7 +117,9 @@ def _collect_pairs(root: Path, depth_suffix: str) -> List[Tuple[Path, Path]]:
     suffix_lower = normalized_suffix.lower()
     pairs: List[Tuple[Path, Path]] = []
 
-    for dirpath, _, filenames in os.walk(root):
+    for dirpath, dirnames, filenames in os.walk(root):
+        # Skip _rejected/ directories entirely
+        dirnames[:] = [d for d in dirnames if d != "_rejected"]
         for fname in filenames:
             fpath = Path(dirpath) / fname
             ext = fpath.suffix.lower()
