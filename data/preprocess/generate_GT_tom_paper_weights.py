@@ -52,22 +52,62 @@ def parse_args():
     return p.parse_args()
 
 
+def _ensure_dinov2_local(da_repo: Path):
+    """Ensure DINOv2 is available under <DA_repo>/torchhub/facebookresearch_dinov2_main.
+
+    DPT_DINOv2 with localhub=True loads DINOv2 via a relative path
+    'torchhub/facebookresearch_dinov2_main' from cwd. We resolve this by
+    ensuring it exists inside the DA repo itself (symlink from torch.hub cache).
+    """
+    target = da_repo / "torchhub" / "facebookresearch_dinov2_main"
+    if target.exists():
+        return
+    # Look in torch.hub cache (the standard location)
+    hub_dir = Path(torch.hub.get_dir())
+    dinov2_cached = hub_dir / "facebookresearch_dinov2_main"
+    if not dinov2_cached.exists():
+        # Try to download it
+        print("DINOv2 not found in torch.hub cache, downloading...")
+        torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14",
+                        trust_repo=True, pretrained=False)
+    if dinov2_cached.exists():
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.symlink_to(dinov2_cached)
+        print(f"Symlinked DINOv2: {target} -> {dinov2_cached}")
+    else:
+        raise FileNotFoundError(
+            f"Cannot find DINOv2 repo at {dinov2_cached}. "
+            "Please run: python -c \"import torch; torch.hub.load('facebookresearch/dinov2', 'dinov2_vitb14')\""
+        )
+
+
 def build_model(encoder="vitb"):
     """Build Depth Anything v1 model by importing directly from the cached repo."""
-    # Add repo root to sys.path so `depth_anything` and `torchhub/` are importable
+    # Add repo root to sys.path so `depth_anything` package is importable
     repo = str(DA_REPO_DIR)
     if repo not in sys.path:
         sys.path.insert(0, repo)
 
-    from depth_anything.dpt import DPT_DINOv2
-    model = DPT_DINOv2(
-        encoder=encoder,
-        features=128,
-        out_channels=[96, 192, 384, 768],
-        use_bn=False,
-        use_clstoken=False,
-        localhub=True,
-    )
+    # Ensure DINOv2 is available for localhub loading
+    _ensure_dinov2_local(DA_REPO_DIR)
+
+    # DPT_DINOv2 uses torch.hub.load(..., source='local') with a relative
+    # path 'torchhub/facebookresearch_dinov2_main', so we must chdir to the
+    # DA repo directory during model construction.
+    orig_cwd = os.getcwd()
+    try:
+        os.chdir(DA_REPO_DIR)
+        from depth_anything.dpt import DPT_DINOv2
+        model = DPT_DINOv2(
+            encoder=encoder,
+            features=128,
+            out_channels=[96, 192, 384, 768],
+            use_bn=False,
+            use_clstoken=False,
+            localhub=True,
+        )
+    finally:
+        os.chdir(orig_cwd)
     return model
 
 
