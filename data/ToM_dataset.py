@@ -32,13 +32,13 @@ from torchvision import transforms
 # Acceptable image extensions
 IMAGE_EXTS: Sequence[str] = (".jpg", ".jpeg", ".png")
 
-# Depth range (metres)
-# NOTE: loosely based on the Depth-Anything visualization range
-MIN_DEPTH: float = 0.01
-MAX_DEPTH: float = 10.0
+# Depth range (relative, per-image normalized to [0, 1])
+MIN_DEPTH: float = 1e-4
+MAX_DEPTH: float = 1.0
 
-# Raw depth values in the .mat file are in metres (float32 already scaled)
-DEPTH_SCALE: float = 1.0
+# Depth PNGs are per-image normalized [0,1] stored as uint16 * 65534.
+# Divide by 65534 on load to get [0,1] range. si=True triggers SSI loss (paper convention).
+DEPTH_SCALE: float = 1.0 / 65534.0
 LIDAR_DEPTH_SCALE: float = 1.0
 
 # Image net normalisation stats (from torchvision.transforms)
@@ -291,7 +291,7 @@ class ToMDataset(Dataset):
             "depth": depth_tensor,
             "depth_mask": depth_mask,
             "flip": flip,
-            "si": False,
+            "si": True,
             "has_lidar": lidar_depth_tensor is not None,
         }
 

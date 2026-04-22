@@ -308,8 +308,8 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
         )
     elif name == "ToM":
         from data.ToM_dataset import ToMDataset
+        # ToM uses its own DEPTH_SCALE (relative depth, not metric) — don't override
         return ToMDataset(root=root, split=split, image_shape=image_shape,
-                          depth_scale=depth_scale,
                           use_lidar=data_cfg.get("use_lidar", False),
                           lidar_root=lidar_root,
                           lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
@@ -441,6 +441,20 @@ def compute_lidar_sparse_loss(
         "valid_pixels": int(valid.sum().item()),
     }
     return sparse_loss, stats
+
+
+def align_pred_si(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor, si_flags: list, eps: float = 1e-6) -> torch.Tensor:
+    """Median-ratio scale alignment for si=True samples (relative-depth datasets like ToM)."""
+    pred_aligned = pred_depth.clone()
+    for i in range(pred_depth.shape[0]):
+        if not si_flags[i]:
+            continue
+        valid_i = gt_mask[i].bool() & (pred_depth[i] > eps) & (gt_depth[i] > eps)
+        if not torch.any(valid_i):
+            continue
+        scale = torch.median(gt_depth[i][valid_i]) / torch.median(pred_depth[i][valid_i])
+        pred_aligned[i] = pred_depth[i] * scale
+    return pred_aligned
 
 
 def compute_depth_rmse(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor) -> torch.Tensor:
@@ -981,9 +995,11 @@ def main():
                         val_fusion_steps += 1
 
                     if "depth" in outputs_val:
-                        rmse_val = compute_depth_rmse(outputs_val["depth"], depth, depth_mask)
-                        abs_rel_val = compute_depth_abs_rel(outputs_val["depth"], depth, depth_mask)
-                        delta1_val = compute_delta1(outputs_val["depth"], depth, depth_mask)
+                        si_flags = [m.get("si", False) for m in image_metas]
+                        pred_for_metrics = align_pred_si(outputs_val["depth"], depth, depth_mask, si_flags)
+                        rmse_val = compute_depth_rmse(pred_for_metrics, depth, depth_mask)
+                        abs_rel_val = compute_depth_abs_rel(pred_for_metrics, depth, depth_mask)
+                        delta1_val = compute_delta1(pred_for_metrics, depth, depth_mask)
                         val_rmse_sum += float(rmse_val.item())
                         val_abs_rel_sum += float(abs_rel_val.item())
                         val_delta1_sum += float(delta1_val.item())
