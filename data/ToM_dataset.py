@@ -25,7 +25,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
-from PIL import Image
+from PIL import Image, ImageFile
 from torch.utils.data import Dataset
 from torchvision import transforms
 
@@ -45,6 +45,9 @@ LIDAR_DEPTH_SCALE: float = 1.0
 # NOTE: These are used in inferencing (revert normalised images)
 IMAGENET_MEAN = [0.485, 0.456, 0.406]
 IMAGENET_STD = [0.229, 0.224, 0.225]
+
+# Allow loading of truncated images (some images are slightly corrupted)
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 
 # ---------------------------------------------------------------------------
