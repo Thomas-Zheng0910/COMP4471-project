@@ -30,20 +30,29 @@ class UniDepthV2Wrapper(BaseDepthModel):
         self._device = device or torch.device("cpu")
 
     @torch.no_grad()
-    def predict_depth(self, rgb: torch.Tensor) -> torch.Tensor:
+    def predict_depth(self, rgb: torch.Tensor, intrinsics: torch.Tensor = None) -> torch.Tensor:
         """
         Args:
             rgb: (B, 3, H, W) uint8 or float [0,1].
+            intrinsics: (B, 3, 3) or (3, 3) optional camera intrinsics.
         Returns:
             depth: (B, 1, H, W) float32 metres.
         """
-        if rgb.dtype == torch.uint8:
-            rgb = rgb.float() / 255.0
+        # UniDepth V2 infer() expects uint8-range (0-255) input:
+        # it internally does rgb.float() / 255.0 then ImageNet normalisation.
+        if rgb.dtype != torch.uint8:
+            rgb_255 = (rgb * 255.0).clamp(0, 255).to(torch.uint8)
+        else:
+            rgb_255 = rgb
 
-        B, _, H, W = rgb.shape
+        B, _, H, W = rgb_255.shape
         depths = []
         for i in range(B):
-            pred = self.model.infer(rgb[i : i + 1].to(self._device))
+            cam = None
+            if intrinsics is not None:
+                cam = intrinsics[i] if intrinsics.ndim == 3 else intrinsics
+                cam = cam.to(self._device)
+            pred = self.model.infer(rgb_255[i : i + 1].to(self._device), camera=cam)
             d = pred["depth"]  # (1, 1, h, w)
             if d.shape[-2:] != (H, W):
                 d = F.interpolate(d, size=(H, W), mode="bilinear", align_corners=False)
