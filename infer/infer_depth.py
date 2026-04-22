@@ -33,7 +33,7 @@ from utils.visualization import colorize, image_grid
 from typing import Optional, Dict, List
 
 # Import IMAGENET_MEAN and IMAGENET_STD from the dataset module
-from data.nyuv2_dataset import IMAGENET_MEAN, IMAGENET_STD
+from data.nyuv2_dataset import IMAGENET_MEAN, IMAGENET_STD, MIN_DEPTH
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Argument parsing
@@ -308,10 +308,12 @@ def main():
                     if pred_i.ndim == 4:
                         pred_i = pred_i.squeeze(0)  # (1, H, W)
                     gt_i   = gts[i]                 # (1, H, W)
-                    mask_i = (gt_i > 0)             # (1, H, W)
+                    mask_i = (gt_i > MIN_DEPTH)      # (1, H, W)
                     # Apply max depth mask if specified
                     if args.max_depth is not None:
                         mask_i = mask_i & (gt_i <= args.max_depth)
+                    # Clamp predictions to valid range
+                    pred_i = pred_i.clamp(min=MIN_DEPTH, max=args.max_depth)
                     # Compute metrics for this sample and accumulate
                     sample_m = eval_depth(
                         gts = gt_i.unsqueeze(0),
@@ -321,6 +323,7 @@ def main():
                     )
                     for name, vals in sample_m.items():
                         agg[name].append(vals.mean().item())
+                    #TODO: generate image
 
         # Collect results and print metrics
         print(f"\n{ROOT_DATASET.__name__} {args.split}-Set Metrics")

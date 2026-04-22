@@ -21,9 +21,9 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.nyuv2_dataset import NYUv2Dataset, IMAGENET_MEAN, IMAGENET_STD
+from data.nyuv2_dataset import NYUv2Dataset, IMAGENET_MEAN, IMAGENET_STD, MIN_DEPTH, NYUV2_INTRINSICS
 from model.baselines import build_baseline, BASELINE_REGISTRY
-from utils.evaluation_depth import eval_depth
+from utils.evaluation_depth import eval_depth, ssi
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -35,6 +35,10 @@ EVAL_DATASET_DEFAULTS = {
     "ibims1": {"root": "datasets/unidepth_data", "max_depth": 10.0},
     "diode_indoor": {"root": "datasets/diode_indoor", "max_depth": 50.0},
 }
+
+# Baselines that output relative (non-metric) depth and need alignment.
+# DA v2 outputs disparity (higher = closer); Marigold outputs relative depth [0,1].
+RELATIVE_BASELINES = {"depth_anything_v2", "marigold"}
 
 
 def _unified_collate_fn(batch):
@@ -55,7 +59,7 @@ def build_eval_dataset(name: str, image_shape, root_override: str = None):
 
     if name == "nyuv2":
         return NYUv2Dataset(root=root, split="test", image_shape=image_shape,
-                            flip_aug=False, return_intrinsics=False)
+                            flip_aug=False, return_intrinsics=True)
     elif name == "ibims1":
         from data.ibims_dataset import IBims1Dataset
         return IBims1Dataset(root=root, image_shape=image_shape)
@@ -159,8 +163,11 @@ def main():
                 # Undo ImageNet normalisation -> [0, 1] float
                 rgb_01 = images * imagenet_std + imagenet_mean
 
-                # Predict
-                pred = model.predict_depth(rgb_01)
+                # Predict — pass intrinsics for metric models (UniDepth)
+                extra = {}
+                if args.baseline == "unidepthv2" and "K" in batch["data"]:
+                    extra["intrinsics"] = batch["data"]["K"].to(device)
+                pred = model.predict_depth(rgb_01, **extra)
 
                 # Ensure same spatial size as GT
                 if pred.shape[-2:] != gts.shape[-2:]:
@@ -168,14 +175,33 @@ def main():
                         pred, size=gts.shape[-2:], mode="bilinear", align_corners=False
                     )
 
+                is_relative = args.baseline in RELATIVE_BASELINES
+
                 # Per-sample metrics
                 B = gts.shape[0]
                 for i in range(B):
                     gt_i = gts[i]
                     pred_i = pred[i]
-                    mask_i = (gt_i > 0)
+                    mask_i = (gt_i > MIN_DEPTH)
                     if max_depth is not None:
                         mask_i = mask_i & (gt_i <= max_depth)
+
+                    if mask_i.sum() < 10:
+                        continue
+
+                    # For relative-depth models, apply SSI alignment before
+                    # computing ALL metrics (standard protocol for DA v2,
+                    # Marigold, etc.).
+                    if is_relative:
+                        gt_masked = gt_i[mask_i]
+                        pred_masked = pred_i[mask_i]
+                        pred_aligned_masked = ssi(gt_masked, pred_masked)
+                        # Write aligned values back into a full tensor
+                        pred_i = pred_i.clone()
+                        pred_i[mask_i] = pred_aligned_masked
+
+                    # Clamp to valid depth range
+                    pred_i = pred_i.clamp(min=MIN_DEPTH, max=max_depth)
 
                     sample_m = eval_depth(
                         gts=gt_i.unsqueeze(0),
