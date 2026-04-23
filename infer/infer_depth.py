@@ -257,7 +257,8 @@ def main():
             root = args.data_root,
             split = args.split,
             image_shape = args.image_shape,
-            depth_scale = args.depth_scale,
+            # depth_scale intentionally omitted — NYUv2 .mat is already in metres
+            # (args.depth_scale is for folder-mode raw PNG conversion only)
             flip_aug = False,
             return_intrinsics = True,
         )
@@ -314,6 +315,11 @@ def main():
                         mask_i = mask_i & (gt_i <= args.max_depth)
                     # Clamp predictions to valid range
                     pred_i = pred_i.clamp(min=MIN_DEPTH, max=args.max_depth)
+
+                    # Skip samples with no valid pixels
+                    if mask_i.sum() == 0:
+                        continue
+
                     # Compute metrics for this sample and accumulate
                     sample_m = eval_depth(
                         gts = gt_i.unsqueeze(0),
@@ -322,12 +328,14 @@ def main():
                         max_depth = args.max_depth,
                     )
                     for name, vals in sample_m.items():
-                        agg[name].append(vals.mean().item())
+                        v = vals.mean().item()
+                        if np.isfinite(v):
+                            agg[name].append(v)
                     #TODO: generate image
 
         # Collect results and print metrics
         print(f"\n{ROOT_DATASET.__name__} {args.split}-Set Metrics")
-        results = {name: float(np.mean(v)) for name, v in agg.items()}
+        results = {name: float(np.nanmean(v)) if v else float('nan') for name, v in agg.items()}
         acc_keys = sorted(k for k in results if k.startswith("d"))
         err_keys = sorted(k for k in results if k not in acc_keys)
         for key in acc_keys + err_keys:

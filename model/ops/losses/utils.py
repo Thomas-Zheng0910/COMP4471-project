@@ -34,7 +34,7 @@ def masked_mean_var(
         return data.mean(dim=dim, keepdim=keepdim), data.var(dim=dim, keepdim=keepdim)
     mask = mask.float()
     mask_sum = torch.sum(mask, dim=dim, keepdim=True)
-    # data = torch.nan_to_num(data, nan=0.0)
+    data = torch.nan_to_num(data, nan=0.0)
     mask_mean = torch.sum(data * mask, dim=dim, keepdim=True) / torch.clamp(
         mask_sum, min=1.0
     )

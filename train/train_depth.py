@@ -855,7 +855,9 @@ def main():
 
             if accum_steps <= 1 or (batch_idx + 1) % accum_steps == 0 or (batch_idx + 1) == len(train_loader):
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                if not torch.isfinite(total_norm):
+                    print(f"  [WARNING] Non-finite gradient norm ({total_norm:.4f}) at step {global_step}, optimizer will skip.")
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
