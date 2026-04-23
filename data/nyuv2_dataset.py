@@ -265,10 +265,10 @@ class NYUv2Dataset(Dataset):
         self.val_seed = int(val_seed)
 
         self.image_transform = (
-            image_transform if image_transform is not None else _default_image_transform(self.image_shape if self.image_shape != (480, 640) else None)
+            image_transform if image_transform is not None else _default_image_transform(self.image_shape)
         )
         self.depth_transform = (
-            depth_transform if depth_transform is not None else _default_depth_transform(self.image_shape if self.image_shape != (480, 640) else None)
+            depth_transform if depth_transform is not None else _default_depth_transform(self.image_shape)
         )
 
         # Read total count once, then close (fork-safety for DataLoader)
