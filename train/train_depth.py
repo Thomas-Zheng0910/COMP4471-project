@@ -115,6 +115,28 @@ def get_args() -> argparse.Namespace:
                              'E.g. "datasets/nyuv2_lidar_projected,,datasets/tom_lidar_projected" '
                              'for nyuv2, sunrgbd (no lidar), ToM')
 
+    # Data augmentation (RGB-only, applied before ToTensor/Normalize)
+    # Set --augment to enable the full augmentation pipeline.
+    # Individual parameters override defaults from data.augmentations.DEFAULT_AUG_CONFIG.
+    parser.add_argument('--augment', action='store_true', default=False,
+                        help='Enable training data augmentation (ColorJitter, GaussianBlur, RandomGamma, RandomGrayscale)')
+    parser.add_argument('--aug_jitter', type=float, default=0.4,
+                        help='ColorJitter brightness/contrast/saturation amount (0 to disable)')
+    parser.add_argument('--aug_jitter_hue', type=float, default=0.1,
+                        help='ColorJitter hue amount')
+    parser.add_argument('--aug_jitter_p', type=float, default=0.8,
+                        help='Probability of applying ColorJitter')
+    parser.add_argument('--aug_blur_sigma', type=float, default=2.0,
+                        help='GaussianBlur max sigma (0 to disable)')
+    parser.add_argument('--aug_blur_p', type=float, default=0.2,
+                        help='Probability of applying GaussianBlur')
+    parser.add_argument('--aug_gamma', type=float, default=0.2,
+                        help='RandomGamma range (0 to disable)')
+    parser.add_argument('--aug_gamma_p', type=float, default=0.8,
+                        help='Probability of applying RandomGamma')
+    parser.add_argument('--aug_grayscale_p', type=float, default=0.2,
+                        help='Probability of converting to grayscale (0 to disable)')
+
     # Checkpoint resume
     parser.add_argument('--resume', type=str, default=None)
 
@@ -209,6 +231,17 @@ def build_config(args: argparse.Namespace) -> dict:
             "max_val_samples": args.max_val_samples,
             "lidar_dropout_prob": args.lidar_dropout_prob,
             "phase4_eval_fallback": args.phase4_eval_fallback,
+            "augment": args.augment,
+            "aug_config": {
+                "jitter": args.aug_jitter,
+                "jitter_hue": args.aug_jitter_hue,
+                "jitter_p": args.aug_jitter_p,
+                "blur_sigma": args.aug_blur_sigma,
+                "blur_p": args.aug_blur_p,
+                "gamma": args.aug_gamma,
+                "gamma_p": args.aug_gamma_p,
+                "grayscale_p": args.aug_grayscale_p,
+            },
         },
     }
 
@@ -282,16 +315,59 @@ def _resolve_lidar_root(name: str, data_cfg: dict, dataset_names: list) -> str |
     return global_root or None
 
 
+def _build_image_transform_with_aug(image_shape, aug_transform):
+    """Build an image transform that applies augmentation BEFORE ToTensor/Normalize.
+
+    The augmentation operates on PIL Images, so the pipeline is:
+        [Resize] → [Augmentation] → ToTensor → Normalize
+
+    Args:
+        image_shape: (H, W) target resolution, or None to skip resize.
+        aug_transform: A transforms.Compose from build_train_augmentation(),
+                       or None to skip augmentation.
+    """
+    from torchvision import transforms as T
+
+    steps = []
+    if image_shape is not None:
+        steps.append(T.Resize(image_shape))
+    if aug_transform is not None:
+        steps.append(aug_transform)
+    steps.append(T.ToTensor())
+    steps.append(T.Normalize(mean=[0.485, 0.456, 0.406],
+                             std=[0.229, 0.224, 0.225]))
+    return T.Compose(steps)
+
+
 def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = None,
                   flip_aug: bool = False, extra_kwargs: dict = None,
                   dataset_names: list = None):
-    """Build a dataset by name with common parameters."""
+    """Build a dataset by name with common parameters.
+
+    When ``data_cfg["augment"]`` is True and ``split`` is a training split,
+    the RGB augmentation pipeline (ColorJitter, GaussianBlur, RandomGamma,
+    RandomGrayscale) is inserted into the image transform.  Augmentation is
+    **never** applied to validation/test splits.
+    """
     root = root_override or DATASET_DEFAULT_ROOTS.get(name)
     image_shape = data_cfg["image_shape"]
     depth_scale = data_cfg.get("depth_scale", 1.0)
     if dataset_names is None:
         dataset_names = [name]
     lidar_root = _resolve_lidar_root(name, data_cfg, dataset_names)
+
+    # Build augmentation transform for training splits only
+    aug_transform = None
+    is_train_split = split in ("train", "all")
+    if is_train_split and data_cfg.get("augment", False):
+        from data.augmentations import build_train_augmentation
+        aug_transform = build_train_augmentation(data_cfg.get("aug_config", {}))
+
+    # If augmentation is active, build a custom image_transform; otherwise let
+    # each dataset use its own default (image_transform=None).
+    image_transform = None
+    if aug_transform is not None:
+        image_transform = _build_image_transform_with_aug(image_shape, aug_transform)
 
     if name == "nyuv2":
         return NYUv2Dataset(
@@ -305,6 +381,7 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
             lidar_h5_key=data_cfg.get("lidar_h5_key"),
             lidar_confidence_h5_key=data_cfg.get("lidar_confidence_h5_key"),
             flip_aug=flip_aug,
+            image_transform=image_transform,
         )
     elif name == "ToM":
         from data.ToM_dataset import ToMDataset
@@ -313,7 +390,8 @@ def build_dataset(name: str, split: str, data_cfg: dict, root_override: str = No
                           use_lidar=data_cfg.get("use_lidar", False),
                           lidar_root=lidar_root,
                           lidar_depth_scale=data_cfg.get("lidar_depth_scale", 1.0),
-                          flip_aug=flip_aug)
+                          flip_aug=flip_aug,
+                          image_transform=image_transform)
                         
     elif name == "sunrgbd":
         from data.sunrgbd_dataset import SUNRGBDDataset
@@ -563,6 +641,15 @@ def main():
     # Use train_root as override for nyuv2 if specified
     if data_cfg.get("train_root") and "nyuv2" in dataset_names:
         dataset_roots_override.setdefault("nyuv2", data_cfg["train_root"])
+
+    # Log augmentation status
+    if data_cfg.get("augment", False):
+        aug_cfg = data_cfg.get("aug_config", {})
+        print(f"  \033[1mAugmentation ENABLED\033[0m: jitter={aug_cfg.get('jitter')}, "
+              f"blur_sigma={aug_cfg.get('blur_sigma')}, gamma={aug_cfg.get('gamma')}, "
+              f"grayscale_p={aug_cfg.get('grayscale_p')}")
+    else:
+        print("  Augmentation: disabled")
 
     train_datasets = []
     for ds_name in dataset_names:

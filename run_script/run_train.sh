@@ -13,7 +13,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Experiment Configuration
 SEED=648
-CUDA=0
+CUDA=4
 # EPOCHS=200
 EPOCHS=100
 BATCH_SIZE=1
@@ -60,7 +60,7 @@ MAX_TRAIN_SAMPLES=5000  # cap samples per epoch (0=use all; full dataset is ~49k
 DATASETS="nyuv2,ToM"
 
 # LiDAR Configuration (set USE_LIDAR=true to enable)
-USE_LIDAR=true
+USE_LIDAR=false
 LIDAR_ROOT="datasets/nyuv2_lidar_projected,datasets/tom_lidar_projected"  # global fallback; used when DATASET_LIDAR_ROOTS entry is empty
 # Per-dataset LiDAR roots, comma-separated and parallel to DATASETS.
 # Leave an entry empty to fall back to LIDAR_ROOT, or omit entirely to use LIDAR_ROOT for all.
@@ -73,6 +73,40 @@ LIDAR_LOSS_WEIGHT=0.5
 LIDAR_DROPOUT_PROB=0.0
 USE_LIDAR_FUSION=true        # enable LiDAR fusion in the decoder
 LIDAR_FUSION_TYPE="token"    # "late" or "token"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data Augmentation (RGB-only, applied before ToTensor/Normalize)
+# ──────────────────────────────────────────────────────────────────────────────
+# Set AUGMENT=true to enable the full augmentation pipeline.
+# These augmentations match the original UniDepth V2 training config.
+# Only affects RGB images during training — depth/LiDAR maps are NOT augmented.
+# Set individual values to 0 to disable that specific augmentation.
+AUGMENT=true
+
+# ColorJitter: randomly adjusts brightness, contrast, saturation by up to this amount.
+# Range [0, 1]. UniDepth V2 default: 0.4
+AUG_JITTER=0.4
+
+# ColorJitter hue: max hue shift. Range [0, 0.5]. UniDepth V2 default: 0.1
+AUG_JITTER_HUE=0.1
+
+# Probability of applying ColorJitter per sample. UniDepth V2 default: 0.8
+AUG_JITTER_P=0.8
+
+# GaussianBlur max sigma. Kernel size is fixed at 5. UniDepth V2 default: 2.0
+AUG_BLUR_SIGMA=2.0
+
+# Probability of applying GaussianBlur per sample. UniDepth V2 default: 0.2
+AUG_BLUR_P=0.2
+
+# RandomGamma range: gamma sampled from [1-range, 1+range]. UniDepth V2 default: 0.2
+AUG_GAMMA=0.2
+
+# Probability of applying RandomGamma per sample. UniDepth V2 default: 0.8
+AUG_GAMMA_P=0.8
+
+# Probability of converting image to grayscale (3-ch output). UniDepth V2 default: 0.2
+AUG_GRAYSCALE_P=0.2
 
 # Checkpoint Resume (leave empty for fresh start)
 RESUME=""
@@ -118,6 +152,14 @@ CMD="python -m train.train_depth \
     --lidar_dropout_prob $LIDAR_DROPOUT_PROB \
     --use_lidar_fusion $USE_LIDAR_FUSION \
     --lidar_fusion_type $LIDAR_FUSION_TYPE \
+    --aug_jitter $AUG_JITTER \
+    --aug_jitter_hue $AUG_JITTER_HUE \
+    --aug_jitter_p $AUG_JITTER_P \
+    --aug_blur_sigma $AUG_BLUR_SIGMA \
+    --aug_blur_p $AUG_BLUR_P \
+    --aug_gamma $AUG_GAMMA \
+    --aug_gamma_p $AUG_GAMMA_P \
+    --aug_grayscale_p $AUG_GRAYSCALE_P \
     --script_path $0"
 
 # Add conditional arguments
@@ -147,6 +189,10 @@ fi
 
 if [ -n "$DATASET_LIDAR_ROOTS" ]; then
     CMD="$CMD --dataset_lidar_roots $DATASET_LIDAR_ROOTS"
+fi
+
+if [ "$AUGMENT" = "true" ]; then
+    CMD="$CMD --augment"
 fi
 
 # Execute Command
