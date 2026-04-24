@@ -74,6 +74,22 @@ USE_LIDAR_FUSION=true        # enable LiDAR fusion in the decoder
 LIDAR_FUSION_TYPE="token"    # "late" or "token"
 
 # ──────────────────────────────────────────────────────────────────────────────
+# GT Hint Regularization (prevents model from over-relying on LiDAR/GT hint)
+# ──────────────────────────────────────────────────────────────────────────────
+# Gate regularization loss: penalizes high gate activation.
+# GATE_REG_TYPE choices: "l2" (gate_mean^2), "l1" (gate_mean), "band" (penalize above target)
+GATE_REG_WEIGHT=0.1
+GATE_REG_TYPE="l2"
+GATE_REG_TARGET=0.3           # only used when GATE_REG_TYPE="band"
+
+# Dynamic hint dropout: linear ramp from start→end over training, with adaptive boost.
+# Set HINT_DROPOUT_END=0 to use static LIDAR_DROPOUT_PROB instead.
+HINT_DROPOUT_START=0.0
+HINT_DROPOUT_END=0.8
+GATE_OVERRELIANCE_THRESHOLD=0.5   # if EMA gate_mean > this, boost dropout
+GATE_OVERRELIANCE_BOOST=0.5       # dropout += boost * (gate_mean - threshold)
+
+# ──────────────────────────────────────────────────────────────────────────────
 # Data Augmentation (RGB-only, applied before ToTensor/Normalize)
 # ──────────────────────────────────────────────────────────────────────────────
 # Set AUGMENT=true to enable the full augmentation pipeline.
@@ -151,6 +167,13 @@ CMD="python -m train.train_depth \
     --lidar_dropout_prob $LIDAR_DROPOUT_PROB \
     --use_lidar_fusion $USE_LIDAR_FUSION \
     --lidar_fusion_type $LIDAR_FUSION_TYPE \
+    --gate_reg_weight $GATE_REG_WEIGHT \
+    --gate_reg_type $GATE_REG_TYPE \
+    --gate_reg_target $GATE_REG_TARGET \
+    --hint_dropout_start $HINT_DROPOUT_START \
+    --hint_dropout_end $HINT_DROPOUT_END \
+    --gate_overreliance_threshold $GATE_OVERRELIANCE_THRESHOLD \
+    --gate_overreliance_boost $GATE_OVERRELIANCE_BOOST \
     --aug_jitter $AUG_JITTER \
     --aug_jitter_hue $AUG_JITTER_HUE \
     --aug_jitter_p $AUG_JITTER_P \

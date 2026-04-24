@@ -89,6 +89,25 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--invariance_loss_weight', type=float, default=0.1)
     parser.add_argument('--lidar_loss_weight', type=float, default=0.5)
 
+    # GT hint regularization (prevents overreliance on LiDAR/GT hint)
+    parser.add_argument('--gate_reg_weight', type=float, default=0.0,
+                        help='Weight for gate regularization loss (0 to disable)')
+    parser.add_argument('--gate_reg_type', type=str, default='l2',
+                        choices=['l1', 'l2', 'band'],
+                        help='Gate reg penalty type: l1, l2, or band (target-band)')
+    parser.add_argument('--gate_reg_target', type=float, default=0.3,
+                        help='Target gate mean for band penalty (only used when gate_reg_type=band)')
+
+    # Dynamic hint dropout schedule (replaces static lidar_dropout_prob)
+    parser.add_argument('--hint_dropout_start', type=float, default=0.0,
+                        help='Hint dropout probability at epoch 0')
+    parser.add_argument('--hint_dropout_end', type=float, default=0.0,
+                        help='Hint dropout probability at final epoch (0 = use static lidar_dropout_prob)')
+    parser.add_argument('--gate_overreliance_threshold', type=float, default=0.5,
+                        help='Gate mean above this triggers adaptive dropout boost')
+    parser.add_argument('--gate_overreliance_boost', type=float, default=0.5,
+                        help='Multiplier for adaptive dropout boost when gate_mean > threshold')
+
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
     parser.add_argument('--val_root', type=str, default=None)
@@ -230,6 +249,13 @@ def build_config(args: argparse.Namespace) -> dict:
             "max_train_samples": args.max_train_samples,
             "max_val_samples": args.max_val_samples,
             "lidar_dropout_prob": args.lidar_dropout_prob,
+            "gate_reg_weight": args.gate_reg_weight,
+            "gate_reg_type": args.gate_reg_type,
+            "gate_reg_target": args.gate_reg_target,
+            "hint_dropout_start": args.hint_dropout_start,
+            "hint_dropout_end": args.hint_dropout_end,
+            "gate_overreliance_threshold": args.gate_overreliance_threshold,
+            "gate_overreliance_boost": args.gate_overreliance_boost,
             "phase4_eval_fallback": args.phase4_eval_fallback,
             "augment": args.augment,
             "aug_config": {
@@ -519,6 +545,73 @@ def compute_lidar_sparse_loss(
         "valid_pixels": int(valid.sum().item()),
     }
     return sparse_loss, stats
+
+
+def compute_gate_reg_loss(
+    gate_values: list,
+    reg_type: str = "l2",
+    target: float = 0.3,
+) -> torch.Tensor:
+    """Compute gate regularization loss from gate tensors.
+
+    Args:
+        gate_values: list of gate tensors (each shape [B, N, C] with values in [0,1]).
+        reg_type: 'l1', 'l2', or 'band'.
+        target: target gate mean for 'band' penalty.
+
+    Returns:
+        Scalar loss tensor (requires grad).
+    """
+    if not gate_values:
+        return torch.tensor(0.0)
+
+    # Mean across all gate tensors (keep grad)
+    gate_mean = torch.stack([g.mean() for g in gate_values]).mean()
+
+    if reg_type == "l1":
+        return gate_mean
+    elif reg_type == "l2":
+        return gate_mean ** 2
+    elif reg_type == "band":
+        excess = torch.clamp(gate_mean - target, min=0.0)
+        return excess ** 2
+    else:
+        raise ValueError(f"Unknown gate_reg_type: {reg_type}")
+
+
+def compute_dynamic_hint_dropout(
+    epoch: int,
+    num_epochs: int,
+    hint_dropout_start: float,
+    hint_dropout_end: float,
+    static_dropout: float,
+    ema_gate_mean: float,
+    overreliance_threshold: float,
+    overreliance_boost: float,
+) -> float:
+    """Compute dynamic hint dropout probability for the current epoch.
+
+    Combines a linear epoch ramp with an adaptive boost when the model
+    over-relies on the GT hint (gate_mean too high).
+
+    Returns:
+        Effective dropout probability in [0, 1].
+    """
+    # If dynamic schedule is disabled, fall back to static
+    if hint_dropout_end <= 0.0:
+        return static_dropout
+
+    # Epoch-based linear ramp
+    progress = epoch / max(num_epochs - 1, 1)
+    p_base = hint_dropout_start + (hint_dropout_end - hint_dropout_start) * progress
+
+    # Adaptive gate-based boost
+    adaptive_boost = 0.0
+    if ema_gate_mean > overreliance_threshold:
+        adaptive_boost = overreliance_boost * (ema_gate_mean - overreliance_threshold)
+
+    p_effective = min(1.0, p_base + adaptive_boost)
+    return p_effective
 
 
 def align_pred_si(pred_depth: torch.Tensor, gt_depth: torch.Tensor, gt_mask: torch.Tensor, si_flags: list, eps: float = 1e-6) -> torch.Tensor:
@@ -827,6 +920,22 @@ def main():
     log_every = train_cfg.get("log_every", 50)
     save_every = train_cfg.get("save_every", 1)
 
+    # ── Hint regularization state ──────────────────────────────────────
+    ema_gate_mean = 0.0  # exponential moving average of gate activation
+    ema_gate_alpha = 0.1  # EMA smoothing factor
+    gate_reg_weight = float(data_cfg.get("gate_reg_weight", 0.0))
+    gate_reg_type = data_cfg.get("gate_reg_type", "l2")
+    gate_reg_target = float(data_cfg.get("gate_reg_target", 0.3))
+    hint_dropout_start = float(data_cfg.get("hint_dropout_start", 0.0))
+    hint_dropout_end = float(data_cfg.get("hint_dropout_end", 0.0))
+    overreliance_threshold = float(data_cfg.get("gate_overreliance_threshold", 0.5))
+    overreliance_boost = float(data_cfg.get("gate_overreliance_boost", 0.5))
+    if gate_reg_weight > 0.0:
+        print(f"\033[1mGate regularization: weight={gate_reg_weight}, type={gate_reg_type}, target={gate_reg_target}\033[0m")
+    if hint_dropout_end > 0.0:
+        print(f"\033[1mDynamic hint dropout: {hint_dropout_start:.2f} → {hint_dropout_end:.2f}, "
+              f"overreliance_thresh={overreliance_threshold}, boost={overreliance_boost}\033[0m")
+
     # ############# #
     # Training loop #
     # ############# #
@@ -879,8 +988,18 @@ def main():
             if lidar_confidence is not None:
                 lidar_confidence = lidar_confidence.to(device)
 
-            # Phase 3: LiDAR dropout (sample-level), improves RGB-only robustness.
-            lidar_dropout_prob = float(data_cfg.get("lidar_dropout_prob", 0.0))
+            # Phase 3: LiDAR / GT hint dropout (sample-level).
+            # Dynamic schedule overrides static when hint_dropout_end > 0.
+            lidar_dropout_prob = compute_dynamic_hint_dropout(
+                epoch=epoch,
+                num_epochs=num_epochs,
+                hint_dropout_start=hint_dropout_start,
+                hint_dropout_end=hint_dropout_end,
+                static_dropout=float(data_cfg.get("lidar_dropout_prob", 0.0)),
+                ema_gate_mean=ema_gate_mean,
+                overreliance_threshold=overreliance_threshold,
+                overreliance_boost=overreliance_boost,
+            )
             if lidar_depth is not None and lidar_mask is not None and lidar_dropout_prob > 0.0:
                 keep = (torch.rand((image.shape[0], 1, 1, 1), device=device) >= lidar_dropout_prob)
                 keep_f = keep.float()
@@ -929,6 +1048,32 @@ def main():
                 )
                 if lidar_raw_loss is not None:
                     losses["opt"]["LiDARSparse"] = lidar_weight * lidar_raw_loss
+
+            # Gate regularization loss (penalizes overreliance on GT hint)
+            gate_reg_loss_val = None
+            fusion_stats = outputs.get("fusion_stats", None)
+            if (
+                gate_reg_weight > 0.0
+                and fusion_stats is not None
+                and fusion_stats.get("gate_values")
+            ):
+                gate_reg_loss_val = compute_gate_reg_loss(
+                    gate_values=fusion_stats["gate_values"],
+                    reg_type=gate_reg_type,
+                    target=gate_reg_target,
+                )
+                losses["opt"]["GateReg"] = gate_reg_weight * gate_reg_loss_val
+
+            # Update EMA gate mean for adaptive dropout
+            if (
+                fusion_stats is not None
+                and float(fusion_stats["lidar_used"].item()) > 0.0
+            ):
+                batch_gate_mean = float(fusion_stats["lidar_gate_mean"].item())
+                ema_gate_mean = (
+                    ema_gate_alpha * batch_gate_mean
+                    + (1 - ema_gate_alpha) * ema_gate_mean
+                )
 
             total_loss = sum(losses["opt"].values())
             if not torch.isfinite(total_loss):
@@ -984,6 +1129,12 @@ def main():
                     if float(fusion_stats["lidar_used"].item()) > 0.0:
                         lidar_gate_mean_sum += float(fusion_stats["lidar_gate_mean"].item())
                         lidar_fusion_steps += 1
+
+                # Hint regularization logging
+                writer.add_scalar("train/hint_dropout_prob", lidar_dropout_prob, global_step)
+                writer.add_scalar("train/ema_gate_mean", ema_gate_mean, global_step)
+                if gate_reg_loss_val is not None:
+                    writer.add_scalar("train/gate_reg_loss_raw", gate_reg_loss_val.item(), global_step)
 
                 # Log sample predicted and GT depth images, and original RGB
                 if "depth" in outputs:

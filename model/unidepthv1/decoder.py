@@ -301,6 +301,7 @@ class DepthHead(nn.Module):
             "lidar_used": torch.tensor(0.0, device=rays_hr.device),
             "lidar_valid_ratio": torch.tensor(0.0, device=rays_hr.device),
             "lidar_gate_mean": torch.tensor(0.0, device=rays_hr.device),
+            "gate_values": [],
         }
 
         # camera_embedding
@@ -371,6 +372,7 @@ class DepthHead(nn.Module):
                         "lidar_used": torch.tensor(1.0, device=rays_hr.device),
                         "lidar_valid_ratio": lidar_valid_ratio.detach(),
                         "lidar_gate_mean": lidar_gate.mean().detach(),
+                        "gate_values": [lidar_gate],
                     }
                 else:
                     # Token fusion will be applied after layers at each scale
@@ -384,6 +386,7 @@ class DepthHead(nn.Module):
                         "lidar_used": torch.tensor(1.0, device=rays_hr.device),
                         "lidar_valid_ratio": lidar_valid_ratio.detach(),
                         "lidar_gate_mean": torch.tensor(0.0, device=rays_hr.device),
+                        "gate_values": [],
                     }
             else:
                 lidar_pack_16 = None
@@ -400,7 +403,7 @@ class DepthHead(nn.Module):
             lidar_fusion_16 = self.lidar_fusion_16(latents_16, context=lidar_tokens_16)
             lidar_gate_16 = self.lidar_gate_16(torch.cat([latents_16, lidar_fusion_16], dim=-1))
             latents_16 = latents_16 + lidar_gate_16 * (lidar_fusion_16 - latents_16)
-            fusion_stats["lidar_gate_mean"] = lidar_gate_16.mean().detach()
+            fusion_stats["gate_values"].append(lidar_gate_16)
         
         latents_8 = self.up8(
             rearrange(
@@ -432,6 +435,7 @@ class DepthHead(nn.Module):
             lidar_fusion_8 = self.lidar_fusion_8(latents_8, context=lidar_tokens_8)
             lidar_gate_8 = self.lidar_gate_8(torch.cat([latents_8, lidar_fusion_8], dim=-1))
             latents_8 = latents_8 + lidar_gate_8 * (lidar_fusion_8 - latents_8)
+            fusion_stats["gate_values"].append(lidar_gate_8)
         
         latents_4 = self.up4(
             rearrange(
@@ -463,6 +467,7 @@ class DepthHead(nn.Module):
             lidar_fusion_4 = self.lidar_fusion_4(latents_4, context=lidar_tokens_4)
             lidar_gate_4 = self.lidar_gate_4(torch.cat([latents_4, lidar_fusion_4], dim=-1))
             latents_4 = latents_4 + lidar_gate_4 * (lidar_fusion_4 - latents_4)
+            fusion_stats["gate_values"].append(lidar_gate_4)
         
         latents_2 = self.up2(
             rearrange(
@@ -487,6 +492,11 @@ class DepthHead(nn.Module):
         out2 = out2.clamp(-10.0, 10.0).exp()
         out4 = out4.clamp(-10.0, 10.0).exp()
         out8 = out8.clamp(-10.0, 10.0).exp()
+
+        # Compute aggregate gate mean across all scales for logging/regularization
+        if fusion_stats["gate_values"]:
+            all_gate_means = [g.mean() for g in fusion_stats["gate_values"]]
+            fusion_stats["lidar_gate_mean"] = torch.stack(all_gate_means).mean().detach()
 
         return out8, out4, out2, proj_latents_16, fusion_stats
 
