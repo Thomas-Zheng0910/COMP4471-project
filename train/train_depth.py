@@ -1109,21 +1109,22 @@ def main():
             distill_loss_val = None
             teacher_outputs = None
             if use_distill and lidar_depth_teacher is not None and lidar_mask_teacher is not None:
+                # Teacher forward always runs so TensorBoard shows teacher
+                # behaviour from step 1, including during warmup.
+                teacher_inputs = {
+                    "image": image,
+                    "depth": depth,
+                    "depth_mask": depth_mask,
+                    "camera": camera,
+                    "lidar_depth": lidar_depth_teacher,
+                    "lidar_mask": lidar_mask_teacher,
+                }
+                if lidar_confidence_teacher is not None:
+                    teacher_inputs["lidar_confidence"] = lidar_confidence_teacher
+                teacher_outputs, _ = ema_teacher(teacher_inputs, image_metas)
+
                 lam = distill_lambda(global_step, _distill_T_warmup, _distill_T_total)
                 if lam > 0.0:
-                    # Teacher forward: EMA model + clean (pre-dropout) lidar hints.
-                    teacher_inputs = {
-                        "image": image,
-                        "depth": depth,
-                        "depth_mask": depth_mask,
-                        "camera": camera,
-                        "lidar_depth": lidar_depth_teacher,
-                        "lidar_mask": lidar_mask_teacher,
-                    }
-                    if lidar_confidence_teacher is not None:
-                        teacher_inputs["lidar_confidence"] = lidar_confidence_teacher
-                    teacher_outputs, _ = ema_teacher(teacher_inputs, image_metas)
-
                     # Distillation on cond_features (multi-channel, H/16 resolution)
                     student_feats = outputs["cond_features"]
                     teacher_feats = teacher_outputs["cond_features"]
