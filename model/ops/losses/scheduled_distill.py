@@ -47,9 +47,20 @@ class EMATeacher(nn.Module):
 
     @torch.no_grad()
     def update(self, student: nn.Module):
-        """EMA update: teacher_p ← alpha * teacher_p + (1-alpha) * student_p."""
-        for ema_p, s_p in zip(self.model.parameters(), student.parameters()):
-            ema_p.data.mul_(self.alpha).add_(s_p.data, alpha=1 - self.alpha)
+        """EMA update for shared parameters only.
+
+        Teacher and student may have different architectures (teacher has lidar
+        fusion modules, student does not).  We match by parameter *name* and
+        only update weights that exist in both models.  Teacher-only parameters
+        (lidar fusion layers) are intentionally left unchanged — they were set
+        once from the pre-trained teacher checkpoint and should not drift.
+        """
+        student_params = dict(student.named_parameters())
+        for name, ema_p in self.model.named_parameters():
+            if name in student_params:
+                s_p = student_params[name]
+                ema_p.data.mul_(self.alpha).add_(s_p.data, alpha=1 - self.alpha)
+            # else: teacher-only param (e.g. lidar fusion) — keep as-is
 
     def forward(self, inputs: dict, image_metas: list):
         """Run teacher forward with hint inputs; returns (outputs, losses).
