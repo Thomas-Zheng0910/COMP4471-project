@@ -1107,6 +1107,7 @@ def main():
 
             # ── Scheduled Self-Distillation ────────────────────────────────────
             distill_loss_val = None
+            teacher_outputs = None
             if use_distill and lidar_depth_teacher is not None and lidar_mask_teacher is not None:
                 lam = distill_lambda(global_step, _distill_T_warmup, _distill_T_total)
                 if lam > 0.0:
@@ -1199,6 +1200,18 @@ def main():
                     writer.add_scalar("train/distill_lambda", lam_log, global_step)
                     if distill_loss_val is not None:
                         writer.add_scalar("train/distill_loss_raw", distill_loss_val.item(), global_step)
+                    # Teacher prediction and lidar fusion stats
+                    if teacher_outputs is not None:
+                        if "depth" in teacher_outputs:
+                            log_depth_images(writer, "train/teacher_pred_depth", teacher_outputs["depth"], global_step)
+                        t_fusion = teacher_outputs.get("fusion_stats", None)
+                        if t_fusion is not None:
+                            writer.add_scalar("train/teacher_fusion_lidar_used",
+                                              float(t_fusion["lidar_used"].item()), global_step)
+                            writer.add_scalar("train/teacher_fusion_lidar_valid_ratio",
+                                              float(t_fusion["lidar_valid_ratio"].item()), global_step)
+                            writer.add_scalar("train/teacher_fusion_lidar_gate_mean",
+                                              float(t_fusion["lidar_gate_mean"].item()), global_step)
 
                 # Log sample predicted and GT depth images, and original RGB
                 if "depth" in outputs:
