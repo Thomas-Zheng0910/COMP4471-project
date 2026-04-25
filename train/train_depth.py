@@ -109,6 +109,14 @@ def get_args() -> argparse.Namespace:
                         help='Weight for feature-MSE component of distillation loss')
     parser.add_argument('--distill_ema_alpha', type=float, default=0.999,
                         help='EMA decay for the teacher (higher = slower update)')
+    parser.add_argument('--teacher_ema_mode', type=str, default='frozen',
+                        choices=['frozen', 'lidar_only'],
+                        help='frozen (default): teacher is a static oracle, never '
+                             'updated after checkpoint load. Prevents shared backbone '
+                             'drifting toward the RGB-only student. '
+                             'lidar_only: EMA updates ONLY teacher-exclusive lidar '
+                             'fusion layers (names containing lidar_); shared encoder/'
+                             'decoder never touched.')
 
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
@@ -732,7 +740,9 @@ def main():
             # teacher_checkpoint.
             print("\033[92m[Teacher] Resuming distillation run — EMA teacher state will be loaded from --resume checkpoint.\033[0m")
         ema_teacher = EMATeacher(model, alpha=float(args.distill_ema_alpha),
-                                 teacher_model=teacher_model).to(device)
+                                 teacher_model=teacher_model,
+                                 ema_mode=args.teacher_ema_mode).to(device)
+        print(f"\033[1mTeacher EMA mode:\033[0m {args.teacher_ema_mode}")
         distill_loss_fn = DistillationLoss(
             temperature=float(args.distill_temperature),
             lambda_logit=float(args.distill_lambda_logit),
@@ -1136,7 +1146,7 @@ def main():
                     )
                     losses["opt"]["Distill"] = _distill_weight * lam * distill_loss_val
 
-            # EMA teacher update — every step, regardless of warmup phase
+            # EMA teacher update (no-op when mode='frozen')
             if ema_teacher is not None:
                 ema_teacher.update(model)
 
