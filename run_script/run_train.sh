@@ -13,7 +13,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Experiment Configuration
 SEED=648
-CUDA=4
+CUDA=1
 # EPOCHS=200
 EPOCHS=100
 BATCH_SIZE=1
@@ -31,9 +31,8 @@ FREEZE_ENCODER_EPOCHS=5
 AMP=true  # set true when GPU memory is limited (shared GPUs, etc.)
 
 # Model Architecture — Pixel Encoder
-ENCODER_NAME="dinov3_vitl16"
-PRETRAINED="./model/backbones/metadinov3/dinov3-weights/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth"
-OUTPUT_IDX="5 12 18 24"
+ENCODER_NAME="convnextv2_large"
+OUTPUT_IDX=""
 USE_CHECKPOINT="true"
 
 # Model Architecture — Pixel Decoder
@@ -111,6 +110,30 @@ AUG_GRAYSCALE_P=0.2
 # Checkpoint Resume (leave empty for fresh start)
 RESUME=""
 
+# ──────────────────────────────────────────────────────────────────────────────
+# Scheduled Self-Distillation
+#
+# MODE A — Train teacher  (current defaults):
+#   DISTILL_WEIGHT=0, USE_LIDAR=true, USE_LIDAR_FUSION=true
+#   LiDAR hints are fused directly into the model. Save the checkpoint.
+#
+# MODE B — Train student via distillation:
+#   DISTILL_WEIGHT>0, TEACHER_CHECKPOINT=<path to teacher epoch_N.pth>
+#   USE_LIDAR=true  (dataset must still load LiDAR so the teacher can use it)
+#   USE_LIDAR_FUSION=false  (student model itself never sees hints)
+#   LIDAR_ROOT must still be set — teacher forward pass needs lidar_depth/mask.
+# ──────────────────────────────────────────────────────────────────────────────
+DISTILL_WEIGHT=0.0          # 0 = disabled (teacher-training mode)
+TEACHER_CHECKPOINT="datasets/teacher/train_depth_1776839443668_3116335/checkpoints/epoch_30.pth"       # path to teacher epoch_N.pth; leave empty when training teacher
+DISTILL_WARMUP_STEPS=3000   # steps before distill loss turns on
+DISTILL_TOTAL_STEPS=0       # 0 = auto (num_epochs * steps_per_epoch)
+DISTILL_TEMPERATURE=4.0     # temperature for soft-KL
+DISTILL_ENTROPY_THRESHOLD=0.5  # teacher confidence mask threshold
+DISTILL_LAMBDA_LOGIT=1.0    # weight for soft-KL component
+DISTILL_LAMBDA_FEAT=0.1     # weight for feature-MSE component
+DISTILL_EMA_ALPHA=0.999     # EMA decay for teacher update (only used in lidar_only mode)
+TEACHER_EMA_MODE="frozen"   # frozen: static oracle (recommended); lidar_only: EMA on lidar layers only
+
 # Build Command
 CMD="python -m train.train_depth \
     --seed $SEED \
@@ -160,6 +183,15 @@ CMD="python -m train.train_depth \
     --aug_gamma $AUG_GAMMA \
     --aug_gamma_p $AUG_GAMMA_P \
     --aug_grayscale_p $AUG_GRAYSCALE_P \
+    --distill_weight $DISTILL_WEIGHT \
+    --distill_warmup_steps $DISTILL_WARMUP_STEPS \
+    --distill_total_steps $DISTILL_TOTAL_STEPS \
+    --distill_temperature $DISTILL_TEMPERATURE \
+    --distill_entropy_threshold $DISTILL_ENTROPY_THRESHOLD \
+    --distill_lambda_logit $DISTILL_LAMBDA_LOGIT \
+    --distill_lambda_feat $DISTILL_LAMBDA_FEAT \
+    --distill_ema_alpha $DISTILL_EMA_ALPHA \
+    --teacher_ema_mode $TEACHER_EMA_MODE \
     --script_path $0"
 
 # Add conditional arguments
@@ -193,6 +225,10 @@ fi
 
 if [ "$AUGMENT" = "true" ]; then
     CMD="$CMD --augment"
+fi
+
+if [ -n "$TEACHER_CHECKPOINT" ]; then
+    CMD="$CMD --teacher_checkpoint $TEACHER_CHECKPOINT"
 fi
 
 # Execute Command

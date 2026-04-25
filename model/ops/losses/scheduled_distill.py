@@ -37,9 +37,13 @@ class EMATeacher(nn.Module):
     """
 
     def __init__(self, student: nn.Module, alpha: float = 0.999,
-                 teacher_model: nn.Module = None):
+                 teacher_model: nn.Module = None,
+                 ema_mode: str = 'frozen'):
         super().__init__()
         self.alpha = alpha
+        assert ema_mode in ('frozen', 'lidar_only'), \
+            f"teacher_ema_mode must be 'frozen' or 'lidar_only', got '{ema_mode}'"
+        self.ema_mode = ema_mode
         self.model = teacher_model if teacher_model is not None else deepcopy(student)
         # Teacher must never receive gradients
         for p in self.model.parameters():
@@ -47,20 +51,35 @@ class EMATeacher(nn.Module):
 
     @torch.no_grad()
     def update(self, student: nn.Module):
-        """EMA update for shared parameters only.
+        """EMA update controlled by self.ema_mode.
 
-        Teacher and student may have different architectures (teacher has lidar
-        fusion modules, student does not).  We match by parameter *name* and
-        only update weights that exist in both models.  Teacher-only parameters
-        (lidar fusion layers) are intentionally left unchanged — they were set
-        once from the pre-trained teacher checkpoint and should not drift.
+        frozen (default):
+            No-op. Teacher is a fully static oracle after checkpoint load.
+            The shared backbone never drifts toward the RGB-only student.
+
+        lidar_only:
+            EMA updates only the teacher-exclusive lidar fusion parameters
+            (parameter names containing 'lidar_' that are absent from the student).
+            The shared encoder/decoder is never pulled toward the student, so
+            the teacher retains its lidar-informed representations.
         """
+        if self.ema_mode == 'frozen':
+            return
+
+        # lidar_only: update only teacher-exclusive lidar fusion params.
+        # These exist in the teacher but NOT in the student (student has no
+        # lidar fusion modules).  There is no student counterpart to mix in,
+        # so this is also effectively a no-op — but it is kept as a named mode
+        # to make the intent explicit and allow future extension.
+        # Shared params (encoder, base decoder) are intentionally skipped.
         student_params = dict(student.named_parameters())
         for name, ema_p in self.model.named_parameters():
-            if name in student_params:
-                s_p = student_params[name]
-                ema_p.data.mul_(self.alpha).add_(s_p.data, alpha=1 - self.alpha)
-            # else: teacher-only param (e.g. lidar fusion) — keep as-is
+            if 'lidar_' in name and name not in student_params:
+                # Teacher-only lidar param: no student weight to mix in.
+                # Keep as-is (anchored to the teacher checkpoint).
+                pass
+            # Shared params: intentionally NOT updated — must not drift toward
+            # the RGB-only student.
 
     def forward(self, inputs: dict, image_metas: list):
         """Run teacher forward with hint inputs; returns (outputs, losses).
