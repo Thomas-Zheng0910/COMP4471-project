@@ -626,6 +626,19 @@ def main():
             config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
             config["model"]["pixel_decoder"]["lidar_fusion_type"] = "token"
 
+    # Fix 1: Student must never have lidar fusion modules.
+    # Lidar fusion is the teacher's privilege only.  Enforce this before the
+    # model is constructed so that the student's state_dict never contains
+    # lidar-fusion keys.
+    if float(args.distill_weight) > 0.0:
+        if config["model"]["pixel_decoder"].get("use_lidar_fusion", False):
+            print(
+                "\033[93m[WARN] --use_lidar_fusion was set but --distill_weight > 0: "
+                "student model must not have lidar fusion. "
+                "Overriding use_lidar_fusion=False for the student.\033[0m"
+            )
+        config["model"]["pixel_decoder"]["use_lidar_fusion"] = False
+
     print("Arguments:")
     for arg in vars(args):
         print(f"  \033[1m{arg}:\033[0m {getattr(args, arg)}")
@@ -670,14 +683,56 @@ def main():
     distill_loss_fn = None
     if use_distill:
         from model.ops.losses.scheduled_distill import EMATeacher, DistillationLoss, distill_lambda
-        ema_teacher = EMATeacher(model, alpha=float(args.distill_ema_alpha)).to(device)
+        # Fix 6: --teacher_checkpoint is mandatory on a fresh start.
+        # On resume the EMA state comes from the student checkpoint instead.
+        if args.teacher_checkpoint is None and args.resume is None:
+            raise ValueError(
+                "--distill_weight > 0 requires --teacher_checkpoint on a fresh run. "
+                "Supply a checkpoint from a lidar-fusion teacher training run "
+                "(Scenario 2) or use --resume to continue a distillation run."
+            )
+        # Always build the teacher architecture with lidar fusion.
+        from copy import deepcopy as _deepcopy
+        teacher_config = _deepcopy(config)
+        teacher_config["model"]["pixel_decoder"]["use_lidar_fusion"] = True
+        teacher_config["model"]["pixel_decoder"]["lidar_fusion_type"] = args.lidar_fusion_type
+        teacher_model = UniDepthV1(teacher_config).to(device)
         if args.teacher_checkpoint is not None:
             teacher_ckpt = torch.load(args.teacher_checkpoint, map_location=device)
+            # Fix 2: Validate teacher was trained with lidar fusion.
+            saved_teacher_cfg = teacher_ckpt.get("config", {})
+            saved_lidar_fusion = (
+                saved_teacher_cfg.get("model", {})
+                                 .get("pixel_decoder", {})
+                                 .get("use_lidar_fusion", None)
+            )
+            if saved_lidar_fusion is False:
+                raise ValueError(
+                    f"The teacher checkpoint '{args.teacher_checkpoint}' was trained "
+                    "with use_lidar_fusion=False (baseline RGB model). "
+                    "A teacher must have lidar fusion enabled. "
+                    "Use a checkpoint from Scenario 2 (--use_lidar_fusion true)."
+                )
+            if saved_lidar_fusion is None:
+                print(
+                    "\033[93m[Teacher] WARNING: checkpoint has no saved config — "
+                    "cannot verify use_lidar_fusion. Proceeding; ensure this is a "
+                    "lidar-fusion teacher checkpoint.\033[0m"
+                )
             teacher_sd = teacher_ckpt.get("model_state_dict", teacher_ckpt)
-            ema_teacher.model.load_state_dict(teacher_sd)
-            print(f"\033[92m[Teacher] Loaded pre-trained teacher weights from {args.teacher_checkpoint}\033[0m")
+            missing, unexpected = teacher_model.load_state_dict(teacher_sd, strict=False)
+            if missing:
+                print(f"\033[93m[Teacher] Missing keys: {missing}\033[0m")
+            if unexpected:
+                print(f"\033[93m[Teacher] Unexpected keys: {unexpected}\033[0m")
+            print(f"\033[92m[Teacher] Loaded weights from {args.teacher_checkpoint}\033[0m")
         else:
-            print("\033[93m[Teacher] No --teacher_checkpoint supplied; EMA teacher initialised from student weights.\033[0m")
+            # args.resume is set — EMA state will be loaded from the student
+            # checkpoint in the resume block below.  No need to load a separate
+            # teacher_checkpoint.
+            print("\033[92m[Teacher] Resuming distillation run — EMA teacher state will be loaded from --resume checkpoint.\033[0m")
+        ema_teacher = EMATeacher(model, alpha=float(args.distill_ema_alpha),
+                                 teacher_model=teacher_model).to(device)
         distill_loss_fn = DistillationLoss(
             temperature=float(args.distill_temperature),
             lambda_logit=float(args.distill_lambda_logit),
@@ -867,13 +922,30 @@ def main():
     if args.resume is not None:
         print(f"\n>>> Resuming from checkpoint: {args.resume} >>>")
         ckpt = torch.load(args.resume, map_location = device)
+        # Fix for Scenario 2 resume: verify architecture matches before loading.
+        # If the user forgets --use_lidar_fusion when resuming a teacher run,
+        # raise a clear error instead of a cryptic state_dict key mismatch.
+        ckpt_lidar_fusion = (
+            ckpt.get("config", {})
+                .get("model", {})
+                .get("pixel_decoder", {})
+                .get("use_lidar_fusion", None)
+        )
+        current_lidar_fusion = config["model"]["pixel_decoder"].get("use_lidar_fusion", False)
+        if ckpt_lidar_fusion is not None and ckpt_lidar_fusion != current_lidar_fusion:
+            raise ValueError(
+                f"Architecture mismatch on resume: checkpoint has "
+                f"use_lidar_fusion={ckpt_lidar_fusion} but current flags give "
+                f"use_lidar_fusion={current_lidar_fusion}. "
+                "Pass the same --use_lidar_fusion value used during the original run."
+            )
         model.load_state_dict(ckpt["model_state_dict"])
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
         start_epoch = ckpt.get("epoch", 0) + 1
         global_step = ckpt.get("global_step", 0)
         # Restore warmup state
-        if using_warmup and "warmup_scheduler_state_dict" in ckpt:
+        if using_warmup and ckpt.get("warmup_scheduler_state_dict") is not None:
             warmup_scheduler.load_state_dict(ckpt["warmup_scheduler_state_dict"])
             warmup_step_count = ckpt.get("warmup_step_count", 0)
             warmup_done = ckpt.get("warmup_done", warmup_step_count >= warmup_steps)
@@ -882,12 +954,19 @@ def main():
             warmup_done = True
             warmup_step_count = warmup_steps
         # Restore AMP scaler state
-        if use_amp and "scaler_state_dict" in ckpt:
+        if use_amp and ckpt.get("scaler_state_dict") is not None:
             scaler.load_state_dict(ckpt["scaler_state_dict"])
-        # Restore EMA teacher state
-        if use_distill and ema_teacher is not None and "ema_teacher_state_dict" in ckpt:
-            ema_teacher.model.load_state_dict(ckpt["ema_teacher_state_dict"])
-            print(f"\033[92mRestored EMA teacher from checkpoint\033[0m")
+        # Fix 5: Restore EMA teacher from the student checkpoint (not from
+        # --teacher_checkpoint).  The EMA state in the student checkpoint IS the
+        # evolved teacher — it already absorbed the teacher_checkpoint weights
+        # at the start of the original run and has been updated since.
+        if use_distill and ema_teacher is not None:
+            if ckpt.get("ema_teacher_state_dict") is not None:
+                ema_teacher.model.load_state_dict(ckpt["ema_teacher_state_dict"])
+                print("\033[92m[Teacher] Restored EMA teacher state from student checkpoint.\033[0m")
+            else:
+                print("\033[93m[Teacher] WARNING: student checkpoint has no ema_teacher_state_dict. "
+                      "Teacher weights remain as loaded from --teacher_checkpoint.\033[0m")
         print(f"\033[92mResumed at epoch {start_epoch}, step {global_step}, warmup_done={warmup_done}\033[0m")
 
     # ── Distillation total-steps resolution ───────────────────────────────────
@@ -963,8 +1042,14 @@ def main():
                 lidar_confidence = lidar_confidence.to(device)
 
             # LiDAR hint dropout (sample-level, static probability).
+            # Fix 3: Snapshot clean lidar BEFORE dropout for the teacher forward.
+            # The teacher always sees full-density lidar; dropout only affects
+            # the non-distill student/supervision path.
+            lidar_depth_teacher = lidar_depth
+            lidar_mask_teacher = lidar_mask
+            lidar_confidence_teacher = lidar_confidence
             lidar_dropout_prob = float(data_cfg.get("lidar_dropout_prob", 0.0))
-            if lidar_depth is not None and lidar_mask is not None and lidar_dropout_prob > 0.0:
+            if not use_distill and lidar_depth is not None and lidar_mask is not None and lidar_dropout_prob > 0.0:
                 keep = (torch.rand((image.shape[0], 1, 1, 1), device=device) >= lidar_dropout_prob)
                 keep_f = keep.float()
                 lidar_depth = lidar_depth * keep_f
@@ -1022,20 +1107,20 @@ def main():
 
             # ── Scheduled Self-Distillation ────────────────────────────────────
             distill_loss_val = None
-            if use_distill and lidar_depth is not None and lidar_mask is not None:
+            if use_distill and lidar_depth_teacher is not None and lidar_mask_teacher is not None:
                 lam = distill_lambda(global_step, _distill_T_warmup, _distill_T_total)
                 if lam > 0.0:
-                    # Teacher forward: EMA model + hint inputs (no grad)
+                    # Teacher forward: EMA model + clean (pre-dropout) lidar hints.
                     teacher_inputs = {
                         "image": image,
                         "depth": depth,
                         "depth_mask": depth_mask,
                         "camera": camera,
-                        "lidar_depth": lidar_depth,
-                        "lidar_mask": lidar_mask,
+                        "lidar_depth": lidar_depth_teacher,
+                        "lidar_mask": lidar_mask_teacher,
                     }
-                    if lidar_confidence is not None:
-                        teacher_inputs["lidar_confidence"] = lidar_confidence
+                    if lidar_confidence_teacher is not None:
+                        teacher_inputs["lidar_confidence"] = lidar_confidence_teacher
                     teacher_outputs, _ = ema_teacher(teacher_inputs, image_metas)
 
                     # Distillation on cond_features (multi-channel, H/16 resolution)
@@ -1185,7 +1270,12 @@ def main():
                         "depth_mask": depth_mask,
                         "camera": camera,
                     }
-                    if lidar_depth is not None and lidar_mask is not None:
+                    # Fix 4: only pass lidar to the val model when it has lidar
+                    # fusion modules (teacher/Scenario 2).  The student model
+                    # (Scenario 3) has use_lidar_fusion=False and must not receive
+                    # lidar keys or it may crash / silently ignore them.
+                    val_model_has_lidar = config["model"]["pixel_decoder"].get("use_lidar_fusion", False)
+                    if val_model_has_lidar and lidar_depth is not None and lidar_mask is not None:
                         inputs["lidar_depth"] = lidar_depth
                         inputs["lidar_mask"] = lidar_mask
                         if lidar_confidence is not None:
@@ -1196,7 +1286,7 @@ def main():
                     # flip-augmented pairs which validation doesn't have.
                     outputs_val, losses_val = model.forward_train(inputs, image_metas, force_compute_losses = False)
                     lidar_val_weight = train_cfg.get("lidar_loss_weight", 0.0)
-                    if lidar_val_weight > 0.0 and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
+                    if lidar_val_weight > 0.0 and val_model_has_lidar and lidar_depth is not None and lidar_mask is not None and "depth" in outputs_val:
                         lidar_val_raw, lidar_val_stats = compute_lidar_sparse_loss(
                             pred_depth = outputs_val["depth"],
                             lidar_depth = lidar_depth,
@@ -1227,7 +1317,7 @@ def main():
                     # Phase 4: fallback check (RGB-only) during validation.
                     if (
                         data_cfg.get("phase4_eval_fallback", True)
-                        and config["model"]["pixel_decoder"].get("use_lidar_fusion", False)
+                        and val_model_has_lidar
                         and lidar_depth is not None
                         and lidar_mask is not None
                     ):

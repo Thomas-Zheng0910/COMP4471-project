@@ -22,19 +22,25 @@ import torch.nn.functional as F
 class EMATeacher(nn.Module):
     """EMA wrapper around the hint branch parameters.
 
-    The teacher is a deep-copied model whose parameters are never updated
-    by gradient descent — only by an exponential moving average of the
-    student (no-hint) model.  It is always run in eval mode.
+    The teacher's weights are never updated by gradient descent — only by an
+    exponential moving average of the student model.  It is always run in eval
+    mode.
 
     Args:
-        model: The main (student) model to copy at initialisation.
-        alpha:  EMA decay; higher → teacher moves more slowly (default 0.999).
+        student:        The student model (used only for parameter shapes when
+                        no explicit teacher_model is given).
+        alpha:          EMA decay; higher → teacher moves more slowly (0.999).
+        teacher_model:  An already-built model to use as the teacher.  When
+                        provided the student model is only used for EMA updates
+                        (its parameters are mixed into the teacher via update()).
+                        When None, the teacher is deep-copied from student.
     """
 
-    def __init__(self, model: nn.Module, alpha: float = 0.999):
+    def __init__(self, student: nn.Module, alpha: float = 0.999,
+                 teacher_model: nn.Module = None):
         super().__init__()
         self.alpha = alpha
-        self.model = deepcopy(model)
+        self.model = teacher_model if teacher_model is not None else deepcopy(student)
         # Teacher must never receive gradients
         for p in self.model.parameters():
             p.requires_grad_(False)
