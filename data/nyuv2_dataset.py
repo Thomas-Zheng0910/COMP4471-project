@@ -22,7 +22,7 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import random
 
-from utils.weather import get_albumentations_weather, depth_based_fog
+from utils.weather import ImgAugFn, DepthAugFn
 
 # ---------------------------------------------------------------------------
 # Camera intrinsics (from the NYU Depth V2 toolbox / UniDepth reference)
@@ -192,10 +192,10 @@ class NYUv2Dataset(Dataset):
         image_transform: Optional[Callable] = None,
         depth_transform: Optional[Callable] = None,
         return_intrinsics: bool = True,
-        # Weather augmentation options (new)
-        weather_aug: Optional[Callable] = None,
-        weather_prob: float = 0.0,
-        use_depth_fog: bool = False,
+        img_aug: Optional[ImgAugFn] = None,
+        depth_aug: Optional[DepthAugFn] = None,
+        img_aug_prob: float = 0.0,
+        depth_aug_prob: float = 0.0,
      ) -> None:
         super().__init__()
 
@@ -225,13 +225,13 @@ class NYUv2Dataset(Dataset):
             depth_transform if depth_transform is not None else _default_depth_transform(self.image_shape if self.image_shape != (480, 640) else None)
         )
 
-        # Weather augmentation configuration
-        # weather_aug: callable(image_np) -> image_np (expects HxWx3 uint8)
-        # weather_prob: probability to apply augmentation to a sample
-        # use_depth_fog: if True, generate depth-based fog using the GT depth
-        self.weather_aug = weather_aug
-        self.weather_prob = float(weather_prob)
-        self.use_depth_fog = bool(use_depth_fog)
+        # Augmentation configuration
+        # img_aug: callable(image_np) -> image_np (expects HxWx3 uint8)
+        # depth_aug: callable(image_np, depth_np) -> image_np
+        self.img_aug = img_aug
+        self.depth_aug = depth_aug
+        self.img_aug_prob = float(img_aug_prob)
+        self.depth_aug_prob = float(depth_aug_prob)
 
         # Read total count once, then close (fork-safety for DataLoader)
         h5 = _load_mat(self.mat_path)
@@ -540,17 +540,13 @@ class NYUv2Dataset(Dataset):
         # Scaling
         depth_np = depth_np * self.depth_scale if self.depth_scale != 1.0 else depth_np
 
-        # Apply weather augmentation (on-the-fly). Use depth-based fog if requested,
-        # otherwise use provided image-space augmentation callable. This operates
-        # on the numpy RGB image (HxWx3 uint8). The depth map is not modified.
+        # Apply augmentations on-the-fly on numpy RGB image (HxWx3 uint8).
         try:
-            if (self.weather_aug is not None or self.use_depth_fog) and random.random() < float(self.weather_prob):
-                if self.use_depth_fog:
-                    image_np = depth_based_fog(image_np, depth_np)
-                elif self.weather_aug is not None:
-                    image_np = self.weather_aug(image_np)
+            if self.img_aug is not None and random.random() < float(self.img_aug_prob):
+                image_np = self.img_aug(image_np)
+            if self.depth_aug is not None and random.random() < float(self.depth_aug_prob):
+                image_np = self.depth_aug(image_np, depth_np)
         except Exception:
-            # Fail-safe: if augmentation errors, fall back to original image_np
             pass
 
         # Convert (possibly augmented) numpy image back to PIL for existing transforms
@@ -646,7 +642,8 @@ class NYUv2Dataset(Dataset):
         return (
             f"NYUv2Dataset(split='{self.split}', "
             f"flip_aug={self.flip_aug}, "
-            f"weather_aug={self.weather_aug is not None}, "
+            f"img_aug={self.img_aug is not None}, "
+            f"depth_aug={self.depth_aug is not None}, "
             f"n_samples={len(self)}, "
             f"mat_path='{self.mat_path}')"
         )
@@ -700,8 +697,18 @@ class NYUv2Dataset(Dataset):
 # Test code
 if __name__ == "__main__":
 
+    # Import the augmentation pipelines
+    from utils.weather import build_img_aug_pipeline, build_depth_aug_pipeline
+    # Build the augmentation pipelines
+    img_aug_pipeline = build_img_aug_pipeline(['weather'])
+    depth_aug_pipeline = build_depth_aug_pipeline(['depth_fog'])
+
     # Quick test: load the first sample from the training split
-    dataset = NYUv2Dataset(split = "train", return_intrinsics = True)
+    dataset = NYUv2Dataset(split = "train", return_intrinsics = True,
+                           img_aug = img_aug_pipeline,
+                           depth_aug = depth_aug_pipeline,
+                           img_aug_prob = 1.0, 
+                           depth_aug_prob = 1.0)
     # Create dataloader
     from torch.utils.data import DataLoader
     dataloader = DataLoader(dataset, batch_size = 1, shuffle = True, 

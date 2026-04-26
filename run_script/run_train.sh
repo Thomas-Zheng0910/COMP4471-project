@@ -47,10 +47,11 @@ IMAGE_SHAPE="480 640"
 DEPTH_SCALE=1.0
 NUM_WORKERS=4
 
-# Weather augmentation
-ENABLE_WEATHER_AUG="true"
-WEATHER_AUG_PROB=0.5
-USE_DEPTH_FOG="false"
+# Augmentation
+IMG_AUG_PROB=0.3
+IMG_AUG_LIST="weather random_crop local_gaussian_blur"
+DEPTH_AUG_PROB=0.3
+DEPTH_AUG_LIST="depth_fog"
 
 # Checkpoint Resume (leave empty for fresh start)
 RESUME=""
@@ -99,10 +100,12 @@ if [ -n "$OUTPUT_IDX" ]; then
     CMD="$CMD --output_idx $OUTPUT_IDX"
 fi
 
-if [ "$ENABLE_WEATHER_AUG" = "true" ]; then
-    CMD="$CMD --enable_weather_aug $ENABLE_WEATHER_AUG"
-    CMD="$CMD --weather_prob $WEATHER_AUG_PROB"
-    CMD="$CMD --use_depth_fog $USE_DEPTH_FOG"
+if [ -n "$IMG_AUG_LIST" ]; then
+    CMD="$CMD --img_aug_prob $IMG_AUG_PROB --img_aug \"$IMG_AUG_LIST\""
+fi
+
+if [ -n "$DEPTH_AUG_LIST" ]; then
+    CMD="$CMD --depth_aug_prob $DEPTH_AUG_PROB --depth_aug \"$DEPTH_AUG_LIST\""
 fi
 
 # Execute Command
