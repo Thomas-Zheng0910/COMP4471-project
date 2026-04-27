@@ -4,9 +4,12 @@ Scheduled Self-Distillation for depth estimation.
 Components
 ----------
 EMATeacher     : EMA-updated copy of the model that runs the *hint* branch.
-distill_lambda : Cosine warmup schedule → scalar weight in [0, 1].
+cosine_up_then_down : Bell-curve schedule peaking at T_peak, then decaying.
 confidence_mask: Entropy-based mask of teacher-confident spatial regions.
 DistillationLoss: Multi-level loss combining soft-KL and feature-MSE.
+compute_teacher_advantage : KL(teacher || student) runtime measurement.
+AdvantageEMA   : Running-EMA normalizer for the advantage signal.
+compute_sharpness : Mean entropy of a feature map (for logging).
 """
 
 import math
@@ -41,8 +44,8 @@ class EMATeacher(nn.Module):
                  ema_mode: str = 'frozen'):
         super().__init__()
         self.alpha = alpha
-        assert ema_mode in ('frozen', 'lidar_only'), \
-            f"teacher_ema_mode must be 'frozen' or 'lidar_only', got '{ema_mode}'"
+        assert ema_mode in ('frozen', 'lidar_only', 'gated'), \
+            f"teacher_ema_mode must be 'frozen', 'lidar_only', or 'gated', got '{ema_mode}'"
         self.ema_mode = ema_mode
         self.model = teacher_model if teacher_model is not None else deepcopy(student)
         # Teacher must never receive gradients
@@ -62,8 +65,21 @@ class EMATeacher(nn.Module):
             (parameter names containing 'lidar_' that are absent from the student).
             The shared encoder/decoder is never pulled toward the student, so
             the teacher retains its lidar-informed representations.
+
+        gated:
+            Full EMA update of ALL shared parameters.  Call site is
+            responsible for gating (e.g. only invoke when val loss improves).
         """
         if self.ema_mode == 'frozen':
+            return
+
+        if self.ema_mode == 'gated':
+            student_params = dict(student.named_parameters())
+            for name, ema_p in self.model.named_parameters():
+                if name in student_params:
+                    ema_p.data.mul_(self.alpha).add_(
+                        student_params[name].data, alpha=1.0 - self.alpha
+                    )
             return
 
         # lidar_only: update only teacher-exclusive lidar fusion params.
@@ -94,26 +110,103 @@ class EMATeacher(nn.Module):
 
 # ─── Distillation Schedule ───────────────────────────────────────────────────
 
-def distill_lambda(t: int, T_warmup: int, T_total: int) -> float:
-    """Cosine warmup schedule for the distillation loss weight.
+def cosine_up_then_down(
+    t: int, T_warmup: int, T_peak: int, T_total: int,
+) -> float:
+    """Bell-curve schedule: ramps 0→1 then 1→0.
 
-    Returns 0 while t < T_warmup, then ramps from 0 → 1 via cosine curve.
+    - t < T_warmup          → 0
+    - T_warmup ≤ t < T_peak → cosine ramp 0 → 1  (teacher most useful early)
+    - T_peak ≤ t ≤ T_total  → cosine ramp 1 → 0  (fade out as student matures)
+    - t > T_total            → 0
 
     Args:
         t:        Current global training step.
-        T_warmup: Number of warm-up steps before distillation starts.
-        T_total:  Total training steps (ramp completes at T_total).
+        T_warmup: Steps before distillation activates.
+        T_peak:   Step at which the schedule reaches its maximum (1.0).
+        T_total:  Step at which the schedule returns to 0.
 
     Returns:
         Scalar weight in [0, 1].
     """
-    if T_total <= T_warmup:
-        return 1.0
+    if T_peak <= T_warmup:
+        T_peak = T_warmup + 1
+    if T_total <= T_peak:
+        T_total = T_peak + 1
     if t < T_warmup:
         return 0.0
-    T_ramp = T_total - T_warmup
-    x = min(t - T_warmup, T_ramp)
-    return 0.5 * (1.0 - math.cos(math.pi * x / T_ramp))
+    if t >= T_total:
+        return 0.0
+    if t < T_peak:
+        # Rising half: cosine 0 → 1
+        x = (t - T_warmup) / (T_peak - T_warmup)
+        return 0.5 * (1.0 - math.cos(math.pi * x))
+    else:
+        # Falling half: cosine 1 → 0
+        x = (t - T_peak) / (T_total - T_peak)
+        return 0.5 * (1.0 + math.cos(math.pi * x))
+
+
+# Keep old name as alias for backward compatibility
+def distill_lambda(t: int, T_warmup: int, T_total: int,
+                   T_peak: int = None) -> float:
+    """Backward-compatible wrapper.  When T_peak is None falls back to
+    cosine_up_then_down with T_peak = T_warmup + (T_total - T_warmup) // 4
+    (≈ early quarter of the ramp)."""
+    if T_peak is None:
+        T_peak = T_warmup + (T_total - T_warmup) // 4
+    return cosine_up_then_down(t, T_warmup, T_peak, T_total)
+
+
+# ─── Teacher Advantage ──────────────────────────────────────────────────────
+
+@torch.no_grad()
+def compute_teacher_advantage(
+    teacher_logits: torch.Tensor,
+    student_logits: torch.Tensor,
+) -> float:
+    """KL(teacher || student) averaged over spatial dims.  Detached scalar.
+
+    High value → teacher distribution is far from student → distillation is
+    informative.  Low value → student has caught up → reduce distillation.
+    """
+    T_prob = F.softmax(teacher_logits, dim=1)
+    S_log_prob = F.log_softmax(student_logits, dim=1)
+    kl = F.kl_div(S_log_prob, T_prob, reduction="batchmean")
+    return float(kl.item())
+
+
+class AdvantageEMA:
+    """Running exponential-moving-average normalizer for the advantage signal.
+
+    advantage_normalized = advantage / (running_mean + eps)
+    This keeps the advantage gate scale-invariant across different models.
+    """
+
+    def __init__(self, alpha: float = 0.99, eps: float = 1e-6):
+        self.alpha = alpha
+        self.eps = eps
+        self._mean: float = 0.0
+        self._initialized: bool = False
+
+    def update_and_normalize(self, raw_advantage: float) -> float:
+        if not self._initialized:
+            self._mean = raw_advantage
+            self._initialized = True
+        else:
+            self._mean = self.alpha * self._mean + (1.0 - self.alpha) * raw_advantage
+        return raw_advantage / (self._mean + self.eps)
+
+
+# ─── Sharpness (entropy) ────────────────────────────────────────────────────
+
+@torch.no_grad()
+def compute_sharpness(logits: torch.Tensor) -> float:
+    """Mean spatial entropy of channel-wise softmax — lower = sharper."""
+    probs = F.softmax(logits, dim=1)                             # (B,C,H,W)
+    log_probs = torch.clamp(probs, min=1e-10).log()
+    entropy = -(probs * log_probs).sum(dim=1)                    # (B,H,W)
+    return float(entropy.mean().item())
 
 
 # ─── Confidence Masking ──────────────────────────────────────────────────────
@@ -238,7 +331,7 @@ class DistillationLoss(nn.Module):
         teacher_logits: torch.Tensor,
         student_feat: torch.Tensor = None,
         teacher_feat: torch.Tensor = None,
-    ) -> torch.Tensor:
+    ):
         """Compute combined distillation loss with confidence masking.
 
         Args:
@@ -248,13 +341,15 @@ class DistillationLoss(nn.Module):
             teacher_feat:   (B, C', H', W') intermediate features, hint branch.
 
         Returns:
-            Scalar combined loss:
-                lambda_logit * soft_kl + lambda_feat * feat_mse
+            (loss, stats) where loss is the scalar combined loss and stats is a
+            dict with diagnostic values for logging.
         """
         # Build confidence mask at logit resolution
         logit_mask = confidence_mask(
             teacher_logits.detach(), self.entropy_threshold
         )                                                       # (B, H, W)
+
+        mask_ratio = float(logit_mask.float().mean().item())
 
         kl = self.soft_kl_loss(student_logits, teacher_logits, logit_mask)
 
@@ -270,4 +365,12 @@ class DistillationLoss(nn.Module):
                 ).squeeze(1).bool()
             feat_loss = self.feature_align_loss(student_feat, teacher_feat, feat_mask)
 
-        return self.lambda_logit * kl + self.lambda_feat * feat_loss
+        combined = self.lambda_logit * kl + self.lambda_feat * feat_loss
+
+        stats = {
+            "mask_ratio": mask_ratio,
+            "kl_raw": float(kl.item()),
+            "feat_raw": float(feat_loss.item()),
+            "teacher_entropy_mean": compute_sharpness(teacher_logits),
+        }
+        return combined, stats

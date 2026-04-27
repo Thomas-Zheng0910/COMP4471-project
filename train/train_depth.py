@@ -99,6 +99,9 @@ def get_args() -> argparse.Namespace:
     parser.add_argument('--distill_total_steps', type=int, default=0,
                         help='T_total: distillation weight reaches 1 at this step '
                              '(0 = auto: num_epochs * steps_per_epoch)')
+    parser.add_argument('--distill_peak_steps', type=int, default=30000,
+                        help='T_peak: step at which distillation schedule reaches '
+                             'its maximum (cosine bell-curve peaks here, then decays)')
     parser.add_argument('--distill_temperature', type=float, default=4.0,
                         help='Temperature for soft-KL output-level distillation')
     parser.add_argument('--distill_entropy_threshold', type=float, default=0.5,
@@ -109,14 +112,13 @@ def get_args() -> argparse.Namespace:
                         help='Weight for feature-MSE component of distillation loss')
     parser.add_argument('--distill_ema_alpha', type=float, default=0.999,
                         help='EMA decay for the teacher (higher = slower update)')
-    parser.add_argument('--teacher_ema_mode', type=str, default='frozen',
-                        choices=['frozen', 'lidar_only'],
-                        help='frozen (default): teacher is a static oracle, never '
-                             'updated after checkpoint load. Prevents shared backbone '
-                             'drifting toward the RGB-only student. '
+    parser.add_argument('--teacher_ema_mode', type=str, default='gated',
+                        choices=['frozen', 'lidar_only', 'gated'],
+                        help='frozen: teacher is a static oracle, never updated. '
                              'lidar_only: EMA updates ONLY teacher-exclusive lidar '
-                             'fusion layers (names containing lidar_); shared encoder/'
-                             'decoder never touched.')
+                             'fusion layers. '
+                             'gated (default): full EMA update of all shared params, '
+                             'but only triggered when val loss improves.')
 
     # Data configuration
     parser.add_argument('--train_root', type=str, default=None)
@@ -690,7 +692,10 @@ def main():
     ema_teacher = None
     distill_loss_fn = None
     if use_distill:
-        from model.ops.losses.scheduled_distill import EMATeacher, DistillationLoss, distill_lambda
+        from model.ops.losses.scheduled_distill import (
+            EMATeacher, DistillationLoss, cosine_up_then_down,
+            compute_teacher_advantage, AdvantageEMA, compute_sharpness,
+        )
         # Fix 6: --teacher_checkpoint is mandatory on a fresh start.
         # On resume the EMA state comes from the student checkpoint instead.
         if args.teacher_checkpoint is None and args.resume is None:
@@ -752,6 +757,7 @@ def main():
         print(
             f"\033[1mScheduled Self-Distillation ENABLED\033[0m: "
             f"weight={_distill_weight}, warmup={args.distill_warmup_steps} steps, "
+            f"T_peak={args.distill_peak_steps}, "
             f"T_total={args.distill_total_steps or 'auto'}, "
             f"T={args.distill_temperature}, ema_alpha={args.distill_ema_alpha}"
         )
@@ -983,12 +989,17 @@ def main():
     # Resolve T_total for the cosine schedule (after train_loader is built)
     _distill_T_warmup = int(data_cfg.get("distill_warmup_steps", args.distill_warmup_steps))
     _distill_T_total = int(data_cfg.get("distill_total_steps", args.distill_total_steps))
+    _distill_T_peak = int(args.distill_peak_steps)
     if _distill_T_total <= 0:
         _distill_T_total = num_epochs * len(train_loader)
+    _advantage_ema = None
+    _best_val_loss = float("inf")
+    _prev_val_loss = float("inf")
     if use_distill:
+        _advantage_ema = AdvantageEMA(alpha=0.99)
         print(
             f"\033[1mDistillation schedule\033[0m: T_warmup={_distill_T_warmup}, "
-            f"T_total={_distill_T_total} steps"
+            f"T_peak={_distill_T_peak}, T_total={_distill_T_total} steps"
         )
 
     # Set up TensorBoard writer
@@ -1117,7 +1128,12 @@ def main():
 
             # ── Scheduled Self-Distillation ────────────────────────────────────
             distill_loss_val = None
+            distill_stats = None
             teacher_outputs = None
+            _lam_sched = 0.0
+            _advantage_raw = 0.0
+            _advantage_norm = 0.0
+            _lam_final = 0.0
             if use_distill and lidar_depth_teacher is not None and lidar_mask_teacher is not None:
                 # Teacher forward always runs so TensorBoard shows teacher
                 # behaviour from step 1, including during warmup.
@@ -1133,22 +1149,28 @@ def main():
                     teacher_inputs["lidar_confidence"] = lidar_confidence_teacher
                 teacher_outputs, _ = ema_teacher(teacher_inputs, image_metas)
 
-                lam = distill_lambda(global_step, _distill_T_warmup, _distill_T_total)
-                if lam > 0.0:
-                    # Distillation on cond_features (multi-channel, H/16 resolution)
+                _lam_sched = cosine_up_then_down(
+                    global_step, _distill_T_warmup, _distill_T_peak, _distill_T_total,
+                )
+                if _lam_sched > 0.0:
                     student_feats = outputs["cond_features"]
                     teacher_feats = teacher_outputs["cond_features"]
-                    distill_loss_val = distill_loss_fn(
+
+                    # Advantage gating: KL(teacher || student)
+                    _advantage_raw = compute_teacher_advantage(
+                        teacher_feats, student_feats,
+                    )
+                    _advantage_norm = _advantage_ema.update_and_normalize(_advantage_raw)
+                    _lam_final = _lam_sched * _advantage_norm
+
+                    # Distillation loss (returns loss, stats)
+                    distill_loss_val, distill_stats = distill_loss_fn(
                         student_logits=student_feats,
                         teacher_logits=teacher_feats,
                         student_feat=student_feats,
                         teacher_feat=teacher_feats,
                     )
-                    losses["opt"]["Distill"] = _distill_weight * lam * distill_loss_val
-
-            # EMA teacher update (no-op when mode='frozen')
-            if ema_teacher is not None:
-                ema_teacher.update(model)
+                    losses["opt"]["Distill"] = _distill_weight * _lam_final * distill_loss_val
 
             total_loss = sum(losses["opt"].values())
             if not torch.isfinite(total_loss):
@@ -1207,10 +1229,20 @@ def main():
 
                 # Distillation logging
                 if use_distill:
-                    lam_log = distill_lambda(global_step, _distill_T_warmup, _distill_T_total)
-                    writer.add_scalar("train/distill_lambda", lam_log, global_step)
+                    writer.add_scalar("distill/lambda_schedule", _lam_sched, global_step)
+                    writer.add_scalar("distill/teacher_advantage", _advantage_raw, global_step)
+                    writer.add_scalar("distill/lambda_final", _lam_final, global_step)
+                    if distill_stats is not None:
+                        writer.add_scalar("distill/mask_ratio", distill_stats["mask_ratio"], global_step)
                     if distill_loss_val is not None:
                         writer.add_scalar("train/distill_loss_raw", distill_loss_val.item(), global_step)
+                    # Sharpness (entropy) logging
+                    if teacher_outputs is not None and "cond_features" in teacher_outputs:
+                        writer.add_scalar("sharpness/teacher",
+                                          compute_sharpness(teacher_outputs["cond_features"]), global_step)
+                    if "cond_features" in outputs:
+                        writer.add_scalar("sharpness/nohint",
+                                          compute_sharpness(outputs["cond_features"]), global_step)
                     # Teacher prediction and lidar fusion stats
                     if teacher_outputs is not None:
                         if "depth" in teacher_outputs:
@@ -1418,6 +1450,26 @@ def main():
                 print(f"\033[1mVal loss: {avg_val_loss:.4f} | Val RMSE: {avg_val_rmse:.4f} | Val AbsRel: {avg_val_abs_rel:.4f} | Val δ1: {avg_val_delta1:.4f}\033[0m")
             else:
                 print(f"\033[1mVal loss: {avg_val_loss:.4f}\033[0m")
+
+            # ── EMA teacher update gated by val improvement ──────────────
+            if use_distill and ema_teacher is not None:
+                _nohint_delta = float(avg_val_loss) - _prev_val_loss
+                _hint_delta = 0.0  # teacher val loss not computed here; log placeholder
+                _prev_val_loss = float(avg_val_loss)
+
+                val_improved = float(avg_val_loss) < _best_val_loss
+                if val_improved:
+                    _best_val_loss = float(avg_val_loss)
+                    ema_teacher.update(model)
+                    print(f"\033[92m[EMA] Val improved → teacher EMA updated (best={_best_val_loss:.4f})\033[0m")
+                else:
+                    print(f"\033[93m[EMA] Val did not improve ({float(avg_val_loss):.4f} >= {_best_val_loss:.4f}) → teacher NOT updated\033[0m")
+
+                # Log EMA diagnostics
+                writer.add_scalar("ema/nohint_delta", _nohint_delta, epoch + 1)
+                writer.add_scalar("ema/hint_delta", _hint_delta, epoch + 1)
+                _ema_ratio = abs(_hint_delta) / (abs(_nohint_delta) + 1e-8)
+                writer.add_scalar("ema/ratio", _ema_ratio, epoch + 1)
 
         # ── Save checkpoint ───────────────────────────────────────────────
         if (epoch + 1) % save_every == 0:
