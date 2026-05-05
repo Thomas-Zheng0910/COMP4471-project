@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Depth Demo</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+</head>
+<body>
+  <main class="container">
+
+    <h1>Depth Sense - DEMO</h1>
+    <p><strong>Checkpoint:</strong> <code>{{ checkpoint_path }}</code></p>
+    <p><strong>Camera defaults:</strong> <code id="camera-defaults">{{ camera_defaults_json }}</code></p>
+    <p><strong>LiDAR defaults:</strong> <code id="lidar-defaults">{{ lidar_defaults_json }}</code></p>
+
+    <section class="panel">
+      <h2>Capture or Upload</h2>
+      <div class="controls">
+        <input id="file-input" type="file" accept="image/*" />
+        <button id="predict-btn" type="button">Predict Depth</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Results</h2>
+      <div class="results">
+        <div>
+          <h3>Input</h3>
+          <img id="input-preview" alt="Input image preview" />
+        </div>
+        <div>
+          <h3>Depth Prediction</h3>
+          <img id="depth-preview" alt="Depth prediction preview" />
+          <p id="depth-stats"></p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Inline JS to open camera picker / upload and POST multipart/form-data to /predict -->
+  <script>
+    const predictBtn = document.getElementById('predict-btn');
+    const fileInput = document.getElementById('file-input');
+    const inputPreview = document.getElementById('input-preview');
+    const depthPreview = document.getElementById('depth-preview');
+    const depthStats = document.getElementById('depth-stats');
+
+    let lastFileBlob = null;
+
+    // When a file is selected (camera capture or upload), store it and show preview
+    fileInput.addEventListener('change', () => {
+      const f = fileInput.files[0];
+      if (!f) return;
+      lastFileBlob = f;
+      inputPreview.src = URL.createObjectURL(f);
+    });
+
+    predictBtn.addEventListener('click', async () => {
+      if (!lastFileBlob) {
+        alert('No image selected or captured.');
+        return;
+      }
+
+      const form = new FormData();
+      form.append('image', lastFileBlob, 'upload.png');
+
+      try {
+        predictBtn.disabled = true;
+        const resp = await fetch('/predict', {
+          method: 'POST',
+          body: form,
+        });
+        predictBtn.disabled = false;
+
+        if (!resp.ok) {
+          const err = await resp.json().catch(() => ({ error: 'Unknown server error' }));
+          alert('Prediction failed: ' + (err.error || resp.statusText));
+          return;
+        }
+
+        const data = await resp.json();
+        if (data.depth_png_base64) {
+          depthPreview.src = 'data:image/png;base64,' + data.depth_png_base64;
+          depthStats.textContent = `min: ${data.depth_min} — max: ${data.depth_max} — shape: ${data.shape_hw.join('x')}`;
+        } else {
+          alert('Unexpected server response.');
+        }
+      } catch (err) {
+        predictBtn.disabled = false;
+        console.error(err);
+        alert('Network or server error. See console for details.');
+      }
+    });
+  </script>
+</body>
+</html>
