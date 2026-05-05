@@ -37,6 +37,9 @@ if torch.cuda.is_available():
     DEVICE = torch.device(device_env)
 else:
     DEVICE = torch.device("cpu")
+if DEVICE.type == "cuda":
+    torch.cuda.set_device(DEVICE)
+print(f"Using device: {DEVICE}")
 
 # Build checkpoint candidate list from env var if present; otherwise empty list.
 DEFAULT_CHECKPOINT_CANDIDATES = []
