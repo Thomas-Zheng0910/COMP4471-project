@@ -63,15 +63,51 @@
         return;
       }
 
-      const form = new FormData();
-      form.append('image', lastFileBlob, 'upload.png');
-
       try {
         predictBtn.disabled = true;
+
+        // Enqueue the job and get job_id + position
+        const enqResp = await fetch('/enqueue', { method: 'POST' });
+        // stop if error
+        if (!enqResp.ok) {
+          predictBtn.disabled = false;
+          alert('Failed to enqueue job');
+          return;
+        }
+        const enqData = await enqResp.json();
+        const jobId = enqData.job_id;
+        // show queueing status (in image blob)
+        depthStats.textContent = `Queued: position ${enqData.position}`;
+
+        // Poll status until this job is first in queue
+        let position = enqData.position;
+        while (position > 1) {
+          await new Promise(r => setTimeout(r, 1000));
+          const st = await fetch(`/status/${jobId}`);
+          if (!st.ok) break;
+          const stj = await st.json();
+          position = stj.position;
+          if (position === 0) {
+            // job disappeared or finished unexpectedly
+            depthStats.textContent = 'Job cleared or finished before start';
+            predictBtn.disabled = false;
+            return;
+          }
+          depthStats.textContent = `Queued: position ${position}`;
+        }
+
+        // Now it's our turn — start inference
+        depthStats.textContent = 'Starting inference >>>';
+
+        const form = new FormData();
+        form.append('image', lastFileBlob, 'upload.png');
+        form.append('job_id', jobId);
+
         const resp = await fetch('/predict', {
           method: 'POST',
           body: form,
         });
+
         predictBtn.disabled = false;
 
         if (!resp.ok) {
