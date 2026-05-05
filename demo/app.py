@@ -12,6 +12,7 @@ import io
 import json
 import base64
 import threading
+import uuid
 
 # third-party imports
 from flask import Flask, jsonify, render_template, request
@@ -200,7 +201,29 @@ def create_app() -> Flask:
 
     # Use a lock to ensure thread safety during inference
     infer_lock = threading.Lock()
+    # Simple in-memory job queue for demonstration (not persistent, not robust)
+    job_queue = []
+    job_queue_lock = threading.Lock()
+
     app = Flask(__name__, template_folder = "templates", static_folder = "static")
+
+    @app.post("/enqueue")
+    def enqueue() -> Any:
+        job_id = uuid.uuid4().hex
+        with job_queue_lock:
+            job_queue.append(job_id)
+            position = len(job_queue)
+        return jsonify({"job_id": job_id, "position": position})
+
+    @app.get("/status/<job_id>")
+    def status(job_id: str) -> Any:
+        with job_queue_lock:
+            if job_id in job_queue:
+                position = job_queue.index(job_id) + 1
+                return jsonify({"position": position})
+            else:
+                # position 0 means finished or not found
+                return jsonify({"position": 0})
 
     # Define routes
     @app.get("/")
@@ -227,12 +250,34 @@ def create_app() -> Flask:
     @app.post("/predict")
     def predict() -> Any:
 
+        # allow a job_id to be supplied for queued behavior (optional)
+        job_id = request.form.get("job_id", None)
+
         # fetch and validate the uploaded image file
         if "image" not in request.files:
+            # if enqueued, remove job early
+            if job_id:
+                with job_queue_lock:
+                    if job_id in job_queue:
+                        job_queue.remove(job_id)
             return jsonify({"error": "no image uploaded"}), 400
         image_file = request.files["image"]
         if image_file.filename == "":
+            if job_id:
+                with job_queue_lock:
+                    if job_id in job_queue:
+                        job_queue.remove(job_id)
             return jsonify({"error": "empty filename"}), 400
+
+        # If a job_id was provided, ensure it's this job's turn (first in queue).
+        if job_id:
+            with job_queue_lock:
+                if not job_queue or job_queue[0] != job_id:
+                    position = job_queue.index(job_id) + 1 if job_id in job_queue else 0
+                    # remove the naughty guy who tried to skip the queue
+                    if job_id in job_queue:
+                        job_queue.remove(job_id)
+                    return jsonify({"error": "not your turn, hacker!", "position": position}), 409
 
         # convert the uploaded image to RGB and remember original size
         try:
@@ -241,6 +286,11 @@ def create_app() -> Flask:
             img = ImageOps.exif_transpose(img)
             img = img.convert("RGB")
         except Exception as e:
+            # if enqueued, remove job early
+            if job_id:
+                with job_queue_lock:
+                    if job_id in job_queue:
+                        job_queue.remove(job_id)
             return jsonify({"error": f"failed to read image: {e}"}), 400
 
         # remember original (height, width) to resize prediction back later
@@ -268,15 +318,24 @@ def create_app() -> Flask:
         rgb_tensor = rgb_tensor.to(DEVICE)
 
         # infer depth and prepare the response
-        with torch.no_grad():
-            with infer_lock:
-                # model.infer expected to accept (B,3,H,W) rgb tensor and intrinsics
-                out = model.infer(rgb_tensor, intrinsics = intrinsics)
-                # expect output dict to contain 'depth' tensor in metres: (B,1,H,W)
-                depth = out.get("depth", None)
-                if depth is None:
-                    return jsonify({"error": "model output missing 'depth'"}), 500
-                depth_t = depth.squeeze(0).squeeze(0).detach().cpu()  # (H, W) on CPU
+        try:
+            with torch.no_grad():
+                with infer_lock:
+                    # model.infer expected to accept (B,3,H,W) rgb tensor and intrinsics
+                    out = model.infer(rgb_tensor, intrinsics = intrinsics)
+                    # expect output dict to contain 'depth' tensor in metres: (B,1,H,W)
+                    depth = out.get("depth", None)
+                    if depth is None:
+                        return jsonify({"error": "model output missing 'depth'"}), 500
+                    depth_t = depth.squeeze(0).squeeze(0).detach().cpu()  # (H, W) on CPU
+        finally:
+            # remove job from queue when finished (or if we bail out early)
+            if job_id:
+                with job_queue_lock:
+                    if job_queue and job_queue[0] == job_id:
+                        job_queue.pop(0)
+                    elif job_id in job_queue:
+                        job_queue.remove(job_id)
 
         # Print / log stats for debugging (min/max depth) to help confirm scale
         dmin = float(torch.min(depth_t).item())
