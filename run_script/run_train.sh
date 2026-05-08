@@ -13,7 +13,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Experiment Configuration
 SEED=648
-CUDA=0
+CUDA=1
 # EPOCHS=200
 EPOCHS=100
 BATCH_SIZE=4
@@ -123,17 +123,16 @@ RESUME=""
 #   USE_LIDAR_FUSION=false  (student model itself never sees hints)
 #   LIDAR_ROOT must still be set — teacher forward pass needs lidar_depth/mask.
 # ──────────────────────────────────────────────────────────────────────────────
-DISTILL_WEIGHT=1.0          # 0 = disabled (teacher-training mode)
+DISTILL_WEIGHT=0.0          # 0 = disabled (teacher-training mode)
 TEACHER_CHECKPOINT="datasets/teacher/train_depth_1776839443668_3116335/checkpoints/epoch_30.pth"       # path to teacher epoch_N.pth; leave empty when training teacher
 DISTILL_WARMUP_STEPS=3000   # steps before distill loss turns on
 DISTILL_TOTAL_STEPS=0       # 0 = auto (num_epochs * steps_per_epoch)
-DISTILL_PEAK_STEPS=30000    # step at which cosine bell-curve peaks (then decays)
 DISTILL_TEMPERATURE=4.0     # temperature for soft-KL
 DISTILL_ENTROPY_THRESHOLD=0.5  # teacher confidence mask threshold
 DISTILL_LAMBDA_LOGIT=1.0    # weight for soft-KL component
 DISTILL_LAMBDA_FEAT=0.1     # weight for feature-MSE component
 DISTILL_EMA_ALPHA=0.999     # EMA decay for teacher update (only used in lidar_only mode)
-TEACHER_EMA_MODE="gated"    # frozen: static oracle; lidar_only: EMA on lidar layers; gated: full EMA on val improvement
+TEACHER_EMA_MODE="frozen"   # frozen: static oracle (recommended); lidar_only: EMA on lidar layers only
 
 # Build Command
 CMD="python -m train.train_depth \
@@ -187,7 +186,6 @@ CMD="python -m train.train_depth \
     --distill_weight $DISTILL_WEIGHT \
     --distill_warmup_steps $DISTILL_WARMUP_STEPS \
     --distill_total_steps $DISTILL_TOTAL_STEPS \
-    --distill_peak_steps $DISTILL_PEAK_STEPS \
     --distill_temperature $DISTILL_TEMPERATURE \
     --distill_entropy_threshold $DISTILL_ENTROPY_THRESHOLD \
     --distill_lambda_logit $DISTILL_LAMBDA_LOGIT \
