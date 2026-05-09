@@ -25,7 +25,9 @@ from PIL import Image
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.nyuv2_dataset import NYUv2Dataset as ROOT_DATASET
+from data.nyuv2_dataset import NYUv2Dataset
+from data.todd_dataset import TODDDataset
+from data.kitti_eigen_dataset import KITTIEigenDataset
 from model.unidepthv1.unidepthv1 import UniDepthV1
 from utils.evaluation_depth import eval_depth
 from utils.visualization import colorize, image_grid
@@ -34,6 +36,13 @@ from typing import Optional, Dict, List
 
 # Import IMAGENET_MEAN and IMAGENET_STD from the dataset module
 from data.nyuv2_dataset import IMAGENET_MEAN, IMAGENET_STD, MIN_DEPTH
+
+# Dataset registry
+DATASET_REGISTRY = {
+    "nyuv2": NYUv2Dataset,
+    "todd": TODDDataset,
+    "kitti": KITTIEigenDataset,
+}
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Argument parsing
@@ -116,6 +125,10 @@ def get_args() -> argparse.Namespace:
                         help="Inference batch size.")
     parser.add_argument("--num_workers", type=int, default=4,
                         help="DataLoader worker processes.")
+    parser.add_argument(
+        "--eval_datasets", type=str, default="nyuv2",
+        help="Comma-separated eval dataset names (e.g. 'nyuv2,todd').",
+    )
     
     # Additional images to evaluate (folder mode)
     parser.add_argument(
@@ -248,103 +261,94 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents = True, exist_ok = True)
 
-    # if data_root is not none
-    if args.data_root is not None:
-        print(f"\n>>> Loading \033[1;33m{ROOT_DATASET.__name__}\033[0m {args.split}-set from {args.data_root} >>>")
-        # Dataset & DataLoader
-        # TODO: extend to other datasets
-        dataset = ROOT_DATASET(
-            root = args.data_root,
-            split = args.split,
-            image_shape = args.image_shape,
-            # depth_scale intentionally omitted — NYUv2 .mat is already in metres
-            # (args.depth_scale is for folder-mode raw PNG conversion only)
-            flip_aug = False,
-            return_intrinsics = True,
+    # Loop over eval datasets
+    eval_dataset_names = [d.strip() for d in args.eval_datasets.split(",")]
+    
+    for ds_name in eval_dataset_names:
+        if args.data_root is None:
+            break
+            
+        DatasetClass = DATASET_REGISTRY.get(ds_name)
+        if DatasetClass is None:
+            print(f"\033[91mUnknown dataset: {ds_name}. Available: {list(DATASET_REGISTRY.keys())}\033[0m")
+            continue
+        
+        print(f"\n>>> Loading \033[1;33m{DatasetClass.__name__}\033[0m {args.split}-set from {args.data_root} >>>")
+        
+        # Build dataset
+        dataset = DatasetClass(
+            root=args.data_root,
+            split=args.split,
+            image_shape=args.image_shape,
+            flip_aug=False,
+            return_intrinsics=True,
         )
         loader = DataLoader(
             dataset,
-            batch_size = args.batch_size,
-            shuffle = False,
-            num_workers = args.num_workers,
-            pin_memory = (device.type == "cuda"),
-            collate_fn = ROOT_DATASET.collate_fn,
+            batch_size=args.batch_size,
+            shuffle=False,
+            num_workers=args.num_workers,
+            pin_memory=(device.type == "cuda"),
+            collate_fn=DatasetClass.collate_fn,
         )
         print(f"\033[92mLoaded {len(dataset)} samples.\033[0m")
 
         # Inference
         agg: dict = defaultdict(list)
 
-        # NOTE: This is not a good practice to hardcode them here
-        # TODO: Use the constants from utils/constants.py instead
-        # We now use the defined macro in the dataset class
-        imagenet_mean = torch.tensor(
-            IMAGENET_MEAN, device = device
-        ).view(1, 3, 1, 1)
-        imagenet_std = torch.tensor(
-            IMAGENET_STD, device = device
-        ).view(1, 3, 1, 1)
+        imagenet_mean = torch.tensor(IMAGENET_MEAN, device=device).view(1, 3, 1, 1)
+        imagenet_std = torch.tensor(IMAGENET_STD, device=device).view(1, 3, 1, 1)
 
         # Inference loop
         with torch.no_grad():
             for batch_idx, batch in tqdm(enumerate(loader), 
-                                         total = len(loader),
-                                         desc = f"Inferencing"):
+                                         total=len(loader),
+                                         desc=f"Inferencing {ds_name}"):
                 
-                # Un-normalise images for model.infer() -> [0,255] uint8
-                images: torch.Tensor = batch["data"]["image"]             # [B, 3, H, W] ImageNet-normed
-                gts: torch.Tensor    = batch["data"]["depth"].to(device)  # [B, 1, H, W]
-                Ks: torch.Tensor     = batch["data"].get("K")             # [B, 3, 3] or None
-                # get batch size
+                images: torch.Tensor = batch["data"]["image"]
+                gts: torch.Tensor = batch["data"]["depth"].to(device)
+                Ks: torch.Tensor = batch["data"].get("K")
                 B = images.shape[0]
                 for i in range(B):
-                    # Undo ImageNet normalisation -> [0,255] uint8 for model.infer()
                     rgb_i = (images[i].to(device) * imagenet_std + imagenet_mean)
                     rgb_uint8 = (rgb_i * 255).clamp(0, 255).to(torch.uint8)
-                    # Optional intrinsics per sample (if dataset provides them)
                     K_i = Ks[i].to(device) if Ks is not None else None
-                    # Run inference for this sample
-                    pred_i: torch.Tensor = model.infer(rgb_uint8, intrinsics = K_i)["depth"]
-                    # Resize tensor
+                    pred_i: torch.Tensor = model.infer(rgb_uint8, intrinsics=K_i)["depth"]
                     if pred_i.ndim == 4:
-                        pred_i = pred_i.squeeze(0)  # (1, H, W)
-                    gt_i   = gts[i]                 # (1, H, W)
-                    mask_i = (gt_i > MIN_DEPTH)      # (1, H, W)
-                    # Apply max depth mask if specified
+                        pred_i = pred_i.squeeze(0)
+                    gt_i = gts[i]
+                    mask_i = (gt_i > MIN_DEPTH)
                     if args.max_depth is not None:
                         mask_i = mask_i & (gt_i <= args.max_depth)
-                    # Clamp predictions to valid range
                     pred_i = pred_i.clamp(min=MIN_DEPTH, max=args.max_depth)
 
-                    # Skip samples with no valid pixels
                     if mask_i.sum() == 0:
                         continue
 
-                    # Compute metrics for this sample and accumulate
                     sample_m = eval_depth(
-                        gts = gt_i.unsqueeze(0),
-                        preds = pred_i.unsqueeze(0),
-                        masks = mask_i.unsqueeze(0),
-                        max_depth = args.max_depth,
+                        gts=gt_i.unsqueeze(0),
+                        preds=pred_i.unsqueeze(0),
+                        masks=mask_i.unsqueeze(0),
+                        max_depth=args.max_depth,
                     )
                     for name, vals in sample_m.items():
                         v = vals.mean().item()
                         if np.isfinite(v):
                             agg[name].append(v)
-                    #TODO: generate image
 
         # Collect results and print metrics
-        print(f"\n{ROOT_DATASET.__name__} {args.split}-Set Metrics")
+        print(f"\n{DatasetClass.__name__} {args.split}-Set Metrics")
         results = {name: float(np.nanmean(v)) if v else float('nan') for name, v in agg.items()}
         acc_keys = sorted(k for k in results if k.startswith("d"))
         err_keys = sorted(k for k in results if k not in acc_keys)
         for key in acc_keys + err_keys:
             print(f"  \033[1m{key:20s}:\033[0m {results[key]:.4f}")
-        m_path = out_dir / f"metrics_{ROOT_DATASET.__name__.lower()}_{args.split}.json"
+        m_path = out_dir / f"metrics_{ds_name.lower()}dataset_{args.split}.json"
         with open(m_path, "w") as f:
-            json.dump(results, f, indent = 2)
+            json.dump(results, f, indent=2)
         print(f"\n\033[92mMetrics saved to {m_path}\033[0m")
-    else:
+    
+    if args.data_root is None:
         # No dataset evaluation — only folder inference if image_folder is set
         pass
 
@@ -427,9 +431,10 @@ def main():
             depth_pred_np = depth_pred.numpy()
             rgb_vis = rgb_np  # (H, W, 3) uint8
 
-            # Colour-map range follows the reference UniDepth demo (0.01–10 m)
+            # Colour-map range: 0.01 to max_depth (10m for indoor, 80m for KITTI)
+            vmax = args.max_depth if args.max_depth is not None else 10.0
             depth_pred_col = colorize(depth_pred_np, 
-                                      vmin = 0.01, vmax = 10.0, cmap = "magma_r")
+                                      vmin = 0.01, vmax = vmax, cmap = "magma_r")
 
             vis_panels: List[np.ndarray] = [rgb_vis, depth_pred_col]
 
@@ -467,7 +472,8 @@ def main():
                 arel_map[mask] = np.abs(gt_np[mask] - depth_pred_resized[mask]) / gt_np[mask]
 
                 # Colour-maps for GT and error
-                gt_col = colorize(gt_np, vmin = 0.01, vmax = 10.0, cmap = "magma_r")
+                vmax = args.max_depth if args.max_depth is not None else 10.0
+                gt_col = colorize(gt_np, vmin = 0.01, vmax = vmax, cmap = "magma_r")
                 err_col = colorize(arel_map, vmin = 0.0, vmax = 0.2, cmap = "coolwarm")
 
                 # Add GT and error panels to visualisation

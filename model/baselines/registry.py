@@ -41,6 +41,5 @@ def build_baseline(name: str, device: torch.device = None, **kwargs):
 
 
 # Import all baseline modules so their @register_baseline decorators run.
-import model.baselines.unidepthv2  # noqa: F401, E402
 import model.baselines.depth_anything_v2  # noqa: F401, E402
 import model.baselines.marigold  # noqa: F401, E402

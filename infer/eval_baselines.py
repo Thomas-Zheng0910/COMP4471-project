@@ -3,8 +3,7 @@ eval_baselines.py — Evaluate baseline depth models on multiple benchmarks.
 
 Usage:
     python -m infer.eval_baselines --baseline marigold --data_root datasets/nyu_depth_v2_labeled.mat
-    python -m infer.eval_baselines --baseline depth_anything_v2 --eval_datasets nyuv2,ibims1,diode_indoor
-    python -m infer.eval_baselines --baseline unidepthv2
+    python -m infer.eval_baselines --baseline depth_anything_v2 --eval_datasets nyuv2,ibims1,diode_indoor,todd
 
 Loads a pretrained baseline via the registry, runs inference on the
 selected evaluation benchmarks, and reports metrics.
@@ -34,6 +33,8 @@ EVAL_DATASET_DEFAULTS = {
     "nyuv2": {"root": "datasets/nyu_depth_v2_labeled.mat", "max_depth": 10.0},
     "ibims1": {"root": "datasets/unidepth_data", "max_depth": 10.0},
     "diode_indoor": {"root": "datasets/diode_indoor", "max_depth": 50.0},
+    "todd": {"root": "datasets/todd", "max_depth": 10.0},
+    "kitti": {"root": "datasets/kitti_eigen", "max_depth": 80.0},
 }
 
 # Baselines that output relative (non-metric) depth and need alignment.
@@ -66,6 +67,13 @@ def build_eval_dataset(name: str, image_shape, root_override: str = None):
     elif name == "diode_indoor":
         from data.diode_dataset import DIODEIndoorDataset
         return DIODEIndoorDataset(root=root, split="val", image_shape=image_shape)
+    elif name == "todd":
+        from data.todd_dataset import TODDDataset
+        return TODDDataset(root=root, split="test", image_shape=image_shape)
+    elif name == "kitti":
+        from data.kitti_eigen_dataset import KITTIEigenDataset
+        return KITTIEigenDataset(root=root, split="test", image_shape=image_shape,
+                                 flip_aug=False, return_intrinsics=True)
     else:
         raise ValueError(f"Unknown eval dataset: {name}. Available: {list(EVAL_DATASET_DEFAULTS.keys())}")
 
@@ -163,11 +171,8 @@ def main():
                 # Undo ImageNet normalisation -> [0, 1] float
                 rgb_01 = images * imagenet_std + imagenet_mean
 
-                # Predict — pass intrinsics for metric models (UniDepth)
-                extra = {}
-                if args.baseline == "unidepthv2" and "K" in batch["data"]:
-                    extra["intrinsics"] = batch["data"]["K"].to(device)
-                pred = model.predict_depth(rgb_01, **extra)
+                # Predict
+                pred = model.predict_depth(rgb_01)
 
                 # Ensure same spatial size as GT
                 if pred.shape[-2:] != gts.shape[-2:]:

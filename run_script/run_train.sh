@@ -13,11 +13,11 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Experiment Configuration
 SEED=648
-CUDA=1
+CUDA=5
 # EPOCHS=200
-EPOCHS=100
-BATCH_SIZE=4
-LR=1e-4 # try 1e-2
+EPOCHS=30
+BATCH_SIZE=2
+LR=1e-4
 ENCODER_LR=1e-5
 LAYER_DECAY=0.9
 LR_MIN=1e-6
@@ -25,10 +25,10 @@ WEIGHT_DECAY=0.01
 CLIP_VALUE=1.0
 LOG_EVERY=50
 SAVE_EVERY=10
-ACCUM_STEPS=4
+ACCUM_STEPS=8
 WARMUP_STEPS=500
 FREEZE_ENCODER_EPOCHS=5
-AMP=false  # set true when GPU memory is limited (shared GPUs, etc.)
+AMP=true  # set true when GPU memory is limited (shared GPUs, etc.)
 
 # Model Architecture — Pixel Encoder
 ENCODER_NAME="convnextv2_large"
@@ -59,7 +59,7 @@ MAX_TRAIN_SAMPLES=5000  # cap samples per epoch (0=use all; full dataset is ~49k
 DATASETS="nyuv2,ToM"
 
 # LiDAR Configuration (set USE_LIDAR=true to enable)
-USE_LIDAR=true
+USE_LIDAR=false
 LIDAR_ROOT="datasets/nyuv2_lidar_projected,datasets/tom_lidar_projected"  # global fallback; used when DATASET_LIDAR_ROOTS entry is empty
 # Per-dataset LiDAR roots, comma-separated and parallel to DATASETS.
 # Leave an entry empty to fall back to LIDAR_ROOT, or omit entirely to use LIDAR_ROOT for all.
@@ -70,7 +70,7 @@ DATASET_LIDAR_ROOTS=""       # leave empty to use LIDAR_ROOT for all LiDAR-capab
 LIDAR_DEPTH_SCALE=1.0
 LIDAR_LOSS_WEIGHT=0.5
 LIDAR_DROPOUT_PROB=0.0
-USE_LIDAR_FUSION=true        # enable LiDAR fusion in the decoder
+USE_LIDAR_FUSION=false        # enable LiDAR fusion in the decoder
 LIDAR_FUSION_TYPE="token"    # "late" or "token"
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -80,7 +80,7 @@ LIDAR_FUSION_TYPE="token"    # "late" or "token"
 # These augmentations match the original UniDepth V2 training config.
 # Only affects RGB images during training — depth/LiDAR maps are NOT augmented.
 # Set individual values to 0 to disable that specific augmentation.
-AUGMENT=true
+AUGMENT=false
 
 # ColorJitter: randomly adjusts brightness, contrast, saturation by up to this amount.
 # Range [0, 1]. UniDepth V2 default: 0.4
@@ -124,7 +124,7 @@ RESUME=""
 #   LIDAR_ROOT must still be set — teacher forward pass needs lidar_depth/mask.
 # ──────────────────────────────────────────────────────────────────────────────
 DISTILL_WEIGHT=0.0          # 0 = disabled (teacher-training mode)
-TEACHER_CHECKPOINT="datasets/teacher/train_depth_1776839443668_3116335/checkpoints/epoch_30.pth"       # path to teacher epoch_N.pth; leave empty when training teacher
+TEACHER_CHECKPOINT="runs/experiments/teacher-finetuned-nyu/checkpoints/epoch_90.pth"       # path to teacher epoch_N.pth; leave empty when training teacher
 DISTILL_WARMUP_STEPS=3000   # steps before distill loss turns on
 DISTILL_TOTAL_STEPS=0       # 0 = auto (num_epochs * steps_per_epoch)
 DISTILL_TEMPERATURE=4.0     # temperature for soft-KL

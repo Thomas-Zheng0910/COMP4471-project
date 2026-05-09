@@ -6,7 +6,6 @@ Each wrapper exposes a unified interface:
     depth = model.predict_depth(rgb_tensor)  # (B,1,H,W) metres
 
 Supported baselines:
-    - "unidepthv2"       : UniDepthV2 (HuggingFace)
     - "depth_anything_v2": Depth Anything V2 (HuggingFace)
     - "marigold"         : Marigold diffusion-based depth (HuggingFace)
 """
